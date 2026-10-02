@@ -17,6 +17,9 @@ entrega.json
 muestra-qc/
 *.zip
 
+# Los archivos de lanzamiento sí se versionan (un push que los cambie lanza el workflow)
+!lanzamiento/*.json
+
 # Blender descargado en local para pruebas
 blender-*-linux-x64/
 blender-*-linux-x64.tar.xz

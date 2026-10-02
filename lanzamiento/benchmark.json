@@ -1,0 +1,10 @@
+{
+  "_leeme": "Lanzamiento por push (rama de trabajo). Mismas entradas que workflow_dispatch de benchmark.yml.",
+  "tipo": "ambos",
+  "variantes": [
+    {"nombre": "2160p30_128", "ajustes": {}},
+    {"nombre": "1440p30_64", "ajustes": {"resolucion": {"ancho": 2560, "alto": 1440}, "cycles": {"muestras": 64}}},
+    {"nombre": "1080p30_64", "ajustes": {"resolucion": {"ancho": 1920, "alto": 1080}, "cycles": {"muestras": 64}}},
+    {"nombre": "1080p30_32", "ajustes": {"resolucion": {"ancho": 1920, "alto": 1080}, "cycles": {"muestras": 32}}}
+  ]
+}

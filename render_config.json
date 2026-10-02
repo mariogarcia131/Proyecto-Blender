@@ -1,0 +1,468 @@
+{
+  "_leeme": "Configuración del vídeo en curso (copia de render_config.example.json). Las claves que empiezan por '_' son comentarios. Referencia: docs/ESTRATEGIA_RENDER.md. Sin credenciales.",
+  "version_config": 2,
+  "_blender": "Versión EXACTA de Blender para todo el vídeo. Tarball oficial de Linux x64 y su SHA-256 publicado en download.blender.org (verificado el 2026-10-02). Forma parte de la huella de render: no se cambia a mitad de un vídeo.",
+  "blender": {
+    "version": "5.2.2",
+    "url": "https://download.blender.org/release/Blender5.2/blender-5.2.2-linux-x64.tar.xz",
+    "sha256": "84098912789dc450e95697c4184fb8a90acbe5111c2ba4aede3fecb57806a168"
+  },
+  "_blend": "El .blend NUNCA va en Git ni en LFS. La nube de Claude lo sube a temp.sh (origen_url); el trabajo 'transporte' de benchmark.yml lo copia a una Release TEMPORAL (pública mientras existe) que render.yml borra al terminar el render. Solo sha256 forma parte de la huella de render.",
+  "blend": {
+    "origen_url": "https://temp.sh/PxGCZ/Avion_Fase_3_Cabina.blend",
+    "release_tag": "transporte-fase3-v1",
+    "url": "https://github.com/mariogarcia131/Proyecto-Blender/releases/download/transporte-fase3-v1/Avion_Fase_3_Cabina.blend",
+    "sha256": "c0d0553caef2ab89ac1b83e6ad64b24c7106be447d659efe02e6eec8dc103411"
+  },
+  "_escena": "Nombre exacto de la escena y del objeto cámara dentro del .blend.",
+  "escena": "AX620",
+  "camara": "CAM_Video",
+  "_frames": "Rango inclusivo. 100 s a 30 fps = 3000 frames (1..3000).",
+  "frames": {
+    "inicio": 1,
+    "fin": 3000
+  },
+  "resolucion": {
+    "ancho": 3840,
+    "alto": 2160,
+    "porcentaje": 100
+  },
+  "fps": 30,
+  "_cycles": "Cycles en CPU con 4 hilos (runner estándar de repo público: 4 vCPU). Semilla estática: semilla_animada = false para evitar parpadeo entre frames.",
+  "cycles": {
+    "dispositivo": "CPU",
+    "hilos": 4,
+    "muestras": 128,
+    "muestreo_adaptativo": true,
+    "umbral_adaptativo": 0.01,
+    "muestras_min": 0,
+    "denoise": true,
+    "denoiser": "OPENIMAGEDENOISE",
+    "persistent_data": true,
+    "semilla": 0,
+    "semilla_animada": false
+  },
+  "_color": "Gestión de color idéntica en todos los trozos; se impone desde aquí aunque el .blend diga otra cosa.",
+  "color": {
+    "dispositivo_display": "sRGB",
+    "view_transform": "AgX",
+    "look": "None",
+    "exposicion": 0.0,
+    "gamma": 1.0
+  },
+  "_salida": "Un PNG por frame, RGB de 16 bits. Patrón de nombre fijo: frame_000123.png.",
+  "salida": {
+    "formato": "PNG",
+    "modo_color": "RGB",
+    "profundidad_bits": 16,
+    "compresion_png": 15,
+    "patron": "frame_{:06d}.png"
+  },
+  "_troceo": "frames_por_trozo = floor(presupuesto_render_s / (s_por_frame_max_benchmark * factor_seguridad)). Se rellena tras el benchmark. Máximo 60 trozos (3 oleadas) por parte para no superar la retención de 1 día de los artefactos. NO forma parte de la huella.",
+  "troceo": {
+    "presupuesto_render_s": 16200,
+    "factor_seguridad": 1.15,
+    "s_por_frame_max_benchmark": null,
+    "s_por_frame_medio_benchmark": null,
+    "fecha_benchmark": null,
+    "frames_por_trozo": null,
+    "max_paralelo": 20,
+    "trozos_max_por_parte": 60,
+    "parada_suave_s": 18000
+  },
+  "_benchmark": "3 a 5 frames representativos: el más simple, el más pesado y uno intermedio.",
+  "benchmark": {
+    "frames": [
+      61,
+      1381,
+      2221,
+      2701
+    ],
+    "fotos": [
+      "08_Cabina_Vista_General_Popa_Dia",
+      "41_POV_Primer_Oficial_Noche"
+    ]
+  },
+  "_video": "Nombre del MP4 final (ASCII sin espacios). Título visible en entrega.json: 'Vídeo Fase 3'. El repositorio no publica el vídeo: se entrega por el servicio externo.",
+  "video": {
+    "nombre_salida": "Video_Fase_3.mp4",
+    "titulo": "Vídeo Fase 3",
+    "crf_intermedio": 11,
+    "pix_fmt_intermedio": "yuv444p10le",
+    "crf_final": 18,
+    "preset_final": "slow",
+    "pix_fmt_final": "yuv420p",
+    "perfil_final": "high"
+  },
+  "_fotos": "Galería de la Fase 3: una cámara CAM_<id> por foto en la colección Camaras_Presentacion, con su estado de cabina fijado en el fotograma 9001+i (fuera del vídeo). 4K y más muestras que el vídeo.",
+  "fotos": [
+    {
+      "id": "01_Exterior_Morro_34_Dia",
+      "camara": "CAM_01_Exterior_Morro_34_Dia",
+      "frame": 9001,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "02_Exterior_Morro_Frontal_Dia",
+      "camara": "CAM_02_Exterior_Morro_Frontal_Dia",
+      "frame": 9002,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "03_Exterior_Sondas_Pitot_AoA_Dia",
+      "camara": "CAM_03_Exterior_Sondas_Pitot_AoA_Dia",
+      "frame": 9003,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "04_Exterior_Parabrisas_Limpiaparabrisas_Dia",
+      "camara": "CAM_04_Exterior_Parabrisas_Limpiaparabrisas_Dia",
+      "frame": 9004,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "05_Exterior_Ventanas_Laterales_Dia",
+      "camara": "CAM_05_Exterior_Ventanas_Laterales_Dia",
+      "frame": 9005,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "06_Exterior_Morro_34_Noche",
+      "camara": "CAM_06_Exterior_Morro_34_Noche",
+      "frame": 9006,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "07_Exterior_Corona_Antenas_Dia",
+      "camara": "CAM_07_Exterior_Corona_Antenas_Dia",
+      "frame": 9007,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "08_Cabina_Vista_General_Popa_Dia",
+      "camara": "CAM_08_Cabina_Vista_General_Popa_Dia",
+      "frame": 9008,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "09_Cabina_Vista_General_Popa_Noche",
+      "camara": "CAM_09_Cabina_Vista_General_Popa_Noche",
+      "frame": 9009,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "10_Panel_Principal_Completo_Dia",
+      "camara": "CAM_10_Panel_Principal_Completo_Dia",
+      "frame": 9010,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "11_Panel_Principal_Completo_Noche",
+      "camara": "CAM_11_Panel_Principal_Completo_Noche",
+      "frame": 9011,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "12_Panel_Capitan_PFD_ND_Dia",
+      "camara": "CAM_12_Panel_Capitan_PFD_ND_Dia",
+      "frame": 9012,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "13_Panel_Primer_Oficial_PFD_ND_Noche",
+      "camara": "CAM_13_Panel_Primer_Oficial_PFD_ND_Noche",
+      "frame": 9013,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "14_Panel_Central_ECAM_Tren_Dia",
+      "camara": "CAM_14_Panel_Central_ECAM_Tren_Dia",
+      "frame": 9014,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "15_Glareshield_FCU_Dia",
+      "camara": "CAM_15_Glareshield_FCU_Dia",
+      "frame": 9015,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "16_Glareshield_FCU_Noche",
+      "camara": "CAM_16_Glareshield_FCU_Noche",
+      "frame": 9016,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "17_FCU_Detalle_Rumbo_Macro_Dia",
+      "camara": "CAM_17_FCU_Detalle_Rumbo_Macro_Dia",
+      "frame": 9017,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "18_Glareshield_EFIS_Capitan_Dia",
+      "camara": "CAM_18_Glareshield_EFIS_Capitan_Dia",
+      "frame": 9018,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "19_Overhead_Delantero_General_Dia",
+      "camara": "CAM_19_Overhead_Delantero_General_Dia",
+      "frame": 9019,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "20_Overhead_Delantero_General_Noche",
+      "camara": "CAM_20_Overhead_Delantero_General_Noche",
+      "frame": 9020,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "21_Overhead_ELEC_FUEL_HYD_Dia",
+      "camara": "CAM_21_Overhead_ELEC_FUEL_HYD_Dia",
+      "frame": 9021,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "22_Overhead_Columna_Izquierda_ADIRS_Dia",
+      "camara": "CAM_22_Overhead_Columna_Izquierda_ADIRS_Dia",
+      "frame": 9022,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "23_Overhead_FIRE_Guardas_Abiertas_Noche",
+      "camara": "CAM_23_Overhead_FIRE_Guardas_Abiertas_Noche",
+      "frame": 9023,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "24_Overhead_Columna_Derecha_Noche",
+      "camara": "CAM_24_Overhead_Columna_Derecha_Noche",
+      "frame": 9024,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "25_Overhead_Trasero_Breakers_Dia",
+      "camara": "CAM_25_Overhead_Trasero_Breakers_Dia",
+      "frame": 9025,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "26_Pedestal_General_Dia",
+      "camara": "CAM_26_Pedestal_General_Dia",
+      "frame": 9026,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "27_Pedestal_General_Noche",
+      "camara": "CAM_27_Pedestal_General_Noche",
+      "frame": 9027,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "28_Pedestal_Gases_Flaps_Speedbrake_Dia",
+      "camara": "CAM_28_Pedestal_Gases_Flaps_Speedbrake_Dia",
+      "frame": 9028,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "29_Pedestal_MCDU_ECP_Dia",
+      "camara": "CAM_29_Pedestal_MCDU_ECP_Dia",
+      "frame": 9029,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "30_Pedestal_RMP_ACP_Macro_Noche",
+      "camara": "CAM_30_Pedestal_RMP_ACP_Macro_Noche",
+      "frame": 9030,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "31_Pedestal_Trasero_MCDU3_Impresora_Dia",
+      "camara": "CAM_31_Pedestal_Trasero_MCDU3_Impresora_Dia",
+      "frame": 9031,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "32_Sidestick_Mesa_Capitan_Dia",
+      "camara": "CAM_32_Sidestick_Mesa_Capitan_Dia",
+      "frame": 9032,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "33_Consola_Lateral_Primer_Oficial_Noche",
+      "camara": "CAM_33_Consola_Lateral_Primer_Oficial_Noche",
+      "frame": 9033,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "34_Pedales_Capitan_Dia",
+      "camara": "CAM_34_Pedales_Capitan_Dia",
+      "frame": 9034,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "35_Asiento_Capitan_Piel_Oveja_Dia",
+      "camara": "CAM_35_Asiento_Capitan_Piel_Oveja_Dia",
+      "frame": 9035,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "36_Asientos_Pilotos_Vista_Trasera_Noche",
+      "camara": "CAM_36_Asientos_Pilotos_Vista_Trasera_Noche",
+      "frame": 9036,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "37_Observador_1_Mamparo_Izquierdo_Dia",
+      "camara": "CAM_37_Observador_1_Mamparo_Izquierdo_Dia",
+      "frame": 9037,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "38_Observador_2_PBE_Extintor_Dia",
+      "camara": "CAM_38_Observador_2_PBE_Extintor_Dia",
+      "frame": 9038,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "39_Puerta_Cabina_Mamparo_Noche",
+      "camara": "CAM_39_Puerta_Cabina_Mamparo_Noche",
+      "frame": 9039,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "40_POV_Capitan_Dia",
+      "camara": "CAM_40_POV_Capitan_Dia",
+      "frame": 9040,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "41_POV_Primer_Oficial_Noche",
+      "camara": "CAM_41_POV_Primer_Oficial_Noche",
+      "frame": 9041,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "42_Techo_Domo_Viseras_Dia",
+      "camara": "CAM_42_Techo_Domo_Viseras_Dia",
+      "frame": 9042,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "43_Cabina_Luz_Tormenta_Noche",
+      "camara": "CAM_43_Cabina_Luz_Tormenta_Noche",
+      "frame": 9043,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    },
+    {
+      "id": "44_Overhead_Prueba_Anunciadores_Noche",
+      "camara": "CAM_44_Overhead_Prueba_Anunciadores_Noche",
+      "frame": 9044,
+      "ancho": 3840,
+      "alto": 2160,
+      "muestras": 512
+    }
+  ],
+  "_qc": "Parámetros de la muestra y de las comprobaciones automáticas del control de calidad que hace la nube de Claude antes de entregar.",
+  "qc": {
+    "frames_muestra_max": 24,
+    "fronteras_max": 8,
+    "fotos_muestra_max": 10,
+    "psnr_min_db": 38,
+    "luminancia_negro": 0.002
+  },
+  "_entrega": "Servicio de descarga externo sin cuenta (verificado 2026-10-02): temp.sh = 4 GB por archivo, 3 días. Alternativa litterbox = 1 GB por archivo, 72 h.",
+  "entrega": {
+    "servicio": "temp.sh",
+    "alternativa": "litterbox",
+    "litterbox_tiempo": "72h",
+    "nombre_zip_fotos": "Fotos_Fase_3.zip",
+    "nombre_blend": "Avion_Fase_3_Cabina.blend"
+  }
+}

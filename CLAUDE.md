@@ -57,6 +57,7 @@ en runners estándar gratuitos de GitHub Actions. **No almacena resultados.**
 | `scripts/entradas.py` | Resuelve las entradas de cada workflow (`workflow_dispatch` o `lanzamiento/<workflow>.json`). |
 | `.github/actions/preparar-runner/action.yml` | Blender exacto (caché + SHA-256), dependencias, ffmpeg y `.blend` verificado. |
 | `lanzamiento/*.json` | Solo en ramas de trabajo: un push que lo cambie lanza el workflow del mismo nombre. |
+| `modelado/fase3/` | Código procedural (F01–F08) que genera `Avion_Fase_3_Cabina.blend` desde la Fase 2.5, más verificación e inventario. |
 
 ## Flujo
 

@@ -1,0 +1,253 @@
+# Benchmark obligatorio antes de cada vídeo (docs/ESTRATEGIA_RENDER.md, secciones c y e).
+#   transporte → plan → benchmark (matriz: un frame o una foto por trabajo) → resumen
+# La entrada «variantes» permite medir en la misma ejecución otras resoluciones, fps o muestras
+# para presentar opciones: lista JSON de {"nombre": "1080p30", "ajustes": {...}} cuyos ajustes se
+# fusionan sobre render_config.json (incluido "benchmark": {"frames": [...]} si cambian los fps).
+name: benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      frames:
+        description: "Frames a medir (p. ej. 1,1350,2700). Vacío = benchmark.frames de la config"
+        default: ""
+      tipo:
+        description: "video · fotos · ambos"
+        default: video
+      fotos:
+        description: "Ids de fotos (vacío = las 2 con más muestras)"
+        default: ""
+      solo_transporte:
+        description: "true = solo crear/verificar la Release de transporte"
+        default: "false"
+      variantes:
+        description: 'Lista JSON de variantes [{"nombre": "...", "ajustes": {...}}]'
+        default: "[]"
+  push:
+    branches: ["claude/**"]
+    paths: ["lanzamiento/benchmark.json"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  entradas:
+    runs-on: ubuntu-latest
+    outputs:
+      frames: ${{ steps.e.outputs.frames }}
+      tipo: ${{ steps.e.outputs.tipo }}
+      fotos: ${{ steps.e.outputs.fotos }}
+      solo_transporte: ${{ steps.e.outputs.solo_transporte }}
+      variantes: ${{ steps.e.outputs.variantes }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: e
+        env:
+          EVENTO: ${{ github.event_name }}
+          INPUTS_JSON: ${{ toJSON(github.event.inputs) }}
+        run: python3 scripts/entradas.py benchmark
+
+  transporte:
+    needs: entradas
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Crear o verificar la Release temporal del .blend
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          eval "$(python3 - <<'PY'
+          import sys, shlex
+          sys.path.insert(0, "scripts")
+          import plan_chunks as pc
+          b = pc.cargar_config("render_config.json")["blend"]
+          for k in ("origen_url", "release_tag", "url", "sha256"):
+              print(f"{k.upper()}={shlex.quote(str(b[k]))}")
+          PY
+          )"
+          ARCHIVO="${URL##*/}"
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            echo "La Release $RELEASE_TAG ya existe: verifico el asset."
+            curl -fL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/$ARCHIVO" "$URL"
+          else
+            echo "Descargando el .blend de $ORIGEN_URL"
+            if [[ "$ORIGEN_URL" == https://temp.sh/* ]]; then
+              curl -fsS --retry 5 --retry-delay 10 -X POST -o "$RUNNER_TEMP/$ARCHIVO" "$ORIGEN_URL"
+            else
+              curl -fL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/$ARCHIVO" "$ORIGEN_URL"
+            fi
+          fi
+          echo "$SHA256  $RUNNER_TEMP/$ARCHIVO" | sha256sum -c -
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP/$ARCHIVO" --prerelease --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" --notes "Transporte temporal: se borra al terminar el render."
+          fi
+          {
+            echo "## Transporte del .blend"
+            echo "Release \`$RELEASE_TAG\` (pre-release, **pública mientras exista**) · SHA-256 \`$SHA256\` ✔"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  plan:
+    needs: [entradas, transporte]
+    if: needs.entradas.outputs.solo_transporte != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matriz: ${{ steps.p.outputs.matriz }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        env:
+          FRAMES: ${{ needs.entradas.outputs.frames }}
+          TIPO: ${{ needs.entradas.outputs.tipo }}
+          FOTOS: ${{ needs.entradas.outputs.fotos }}
+          VARIANTES: ${{ needs.entradas.outputs.variantes }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          variantes = json.loads(os.environ["VARIANTES"] or "[]") or [{"nombre": "base", "ajustes": {}}]
+          matriz = []
+          for i, v in enumerate(variantes):
+              aj = json.dumps(v.get("ajustes") or {}, ensure_ascii=False)
+              tipo = os.environ["TIPO"] if i == 0 else ("video" if os.environ["TIPO"] != "fotos" else "fotos")
+              cmd = ["python3", "scripts/plan_chunks.py", "--config", "render_config.json", "--modo", "benchmark",
+                     "--tipo", tipo, "--ajustes", aj]
+              if os.environ["FRAMES"] and not (v.get("ajustes") or {}).get("benchmark"):
+                  cmd += ["--frames", os.environ["FRAMES"]]
+              if os.environ["FOTOS"]:
+                  cmd += ["--fotos", os.environ["FOTOS"]]
+              plan = json.loads(subprocess.check_output(cmd))
+              for t in plan["trozos"]:
+                  t.update(variante=v["nombre"], ajustes=aj, nombre=f"{v['nombre']}-{t['nombre']}")
+                  matriz.append(t)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("matriz=" + json.dumps(matriz, ensure_ascii=False) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"## Benchmark: {len(matriz)} trabajos\n\n| Trabajo | Variante | Frames / fotos |\n|---|---|---|\n")
+              for t in matriz:
+                  f.write(f"| {t['nombre']} | {t['variante']} | {t.get('rangos_txt') or t.get('fotos_txt')} |\n")
+          PY
+
+  benchmark:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        trozo: ${{ fromJSON(needs.plan.outputs.matriz) }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: prep
+        uses: ./.github/actions/preparar-runner
+      - name: Render del benchmark
+        timeout-minutes: 330
+        env:
+          AJUSTES: ${{ matrix.trozo.ajustes }}
+        run: |
+          export RENDER_PASO_INICIO="$(date +%s)"
+          if [ "${{ matrix.trozo.tipo }}" = "fotos" ]; then SEL=(--fotos "${{ matrix.trozo.fotos_txt }}"); else SEL=(--rangos "${{ matrix.trozo.rangos_txt }}"); fi
+          "${{ steps.prep.outputs.blender }}" -b "${{ steps.prep.outputs.blend }}" --factory-startup -noaudio -t 4 --python-exit-code 1 \
+            -P scripts/render_chunk.py -- --config render_config.json --trozo "${{ matrix.trozo.nombre }}" \
+            "${SEL[@]}" --salida "$RUNNER_TEMP/frames" \
+            --manifiesto "$RUNNER_TEMP/manifest/manifest-${{ matrix.trozo.nombre }}.json" \
+            --benchmark --ajustes "$AJUSTES"
+      - name: Subir manifiesto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-${{ matrix.trozo.nombre }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/manifest/
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Subir imagen (revisión visual con los ajustes finales)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frames-${{ matrix.trozo.nombre }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frames/*.png
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Resumen
+        if: always()
+        run: |
+          m="$RUNNER_TEMP/manifest/manifest-${{ matrix.trozo.nombre }}.json"
+          [ -f "$m" ] || exit 0
+          {
+            echo "### ${{ matrix.trozo.nombre }}"
+            jq -r '"CPU: \(.cpu) · carga \(.t_carga_s) s · estado \(.estado)"' "$m"
+            jq -r '(.frames_completados // []) + (.fotos_completadas // []) | .[] | "- \(.frame // .id): \(.t_render_s) s"' "$m"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  resumen:
+    needs: [plan, benchmark]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: manifest-*
+          path: ${{ runner.temp }}/manifiestos
+      - name: benchmark.json y estimación
+        env:
+          MATRIZ: ${{ needs.plan.outputs.matriz }}
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil, subprocess, sys
+          sys.path.insert(0, "scripts")
+          matriz = json.loads(os.environ["MATRIZ"])
+          base = os.path.join(os.environ["RUNNER_TEMP"], "manifiestos")
+          variantes = {}
+          for t in matriz:
+              variantes.setdefault(t["variante"], t["ajustes"])
+          salida = {"run_id": int(os.environ["GITHUB_RUN_ID"]), "variantes": {}}
+          resumen = ["## Resultado del benchmark", ""]
+          for nombre, aj in variantes.items():
+              d = os.path.join(base, "_" + nombre)
+              os.makedirs(d, exist_ok=True)
+              for x in os.listdir(base):
+                  if x.startswith(f"manifest-{nombre}-"):
+                      for y in os.listdir(os.path.join(base, x)):
+                          shutil.copy(os.path.join(base, x, y), d)
+              r = subprocess.run(["python3", "scripts/plan_chunks.py", "--config", "render_config.json", "--modo", "resumen",
+                                  "--manifiestos", d, "--run-id", os.environ["GITHUB_RUN_ID"], "--ajustes", aj],
+                                 capture_output=True, text=True)
+              if r.returncode:
+                  resumen.append(f"### {nombre}: sin mediciones\n```\n{r.stderr.strip()}\n```")
+                  continue
+              bm = json.loads(r.stdout)
+              salida["variantes"][nombre] = bm
+              e = bm.get("estimacion") or {}
+              resumen += [f"### Variante `{nombre}`", "", "| Frame / foto | t_render_s | t_carga_s | CPU |", "|---|---|---|---|"]
+              resumen += [f"| {f['frame']} | {f['t_render_s']} | {f['t_carga_s']} | {f['cpu']} |" for f in bm["frames"]]
+              resumen += [f"| foto {f['id']} | {f['t_render_s']} | {f['t_carga_s']} | {f['cpu']} |" for f in bm["fotos"]]
+              resumen.append("")
+              if "error" in e:
+                  resumen.append(f"⚠️ {e['error']}")
+              elif e:
+                  resumen.append(f"**{e['resolucion']} · {e['fps']} fps · {e['muestras']} muestras · {e['duracion_s']} s** → "
+                                 f"s/frame máx {e['s_por_frame_max']} · medio {e['s_por_frame_medio']} · "
+                                 f"frames/trozo **{e['frames_por_trozo']}** · trozos **{e['trozos']}** + lotes de fotos "
+                                 f"{e['lotes_fotos']} · oleadas **{e['oleadas']}** · partes **{e['partes']}** · "
+                                 f"horas reales ≈ **{e['horas_reales_cota']} h** (peor caso {e['horas_reales_peor_caso']} h) · "
+                                 f"horas de runner ≈ {e['horas_runner']} h")
+              resumen.append("")
+          json.dump(salida, open("benchmark.json", "w"), ensure_ascii=False, indent=1)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(resumen) + "\n")
+          print(json.dumps(salida, ensure_ascii=False, indent=1))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark
+          path: benchmark.json
+          retention-days: 1

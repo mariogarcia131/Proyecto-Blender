@@ -19,8 +19,10 @@ en runners estándar gratuitos de GitHub Actions. **No almacena resultados.**
 
 ## Estado
 
-- Documentación y plantilla de configuración: **hechas**.
-- Workflows y scripts: **pendientes de implementar** siguiendo el documento maestro.
+- Documentación, plantilla de configuración, workflows y scripts: **hechos** (probados de extremo a
+  extremo en local con una escena sintética; ver `docs/ESTRATEGIA_RENDER.md` § r).
+- `workflow_dispatch` solo existe si el workflow está en la rama por defecto: desde una rama de
+  trabajo se lanza con un push que modifique `lanzamiento/<workflow>.json` (mismas entradas).
 
 ## Reglas obligatorias
 
@@ -52,6 +54,9 @@ en runners estándar gratuitos de GitHub Actions. **No almacena resultados.**
 | `scripts/entrega.sh` | Subida a temp.sh/Litterbox, verificación SHA-256, `entrega.json`. |
 | `scripts/limpieza.sh` | Borra Releases, tags, artefactos y cachés, y verifica que no queda nada. |
 | `scripts/qc_muestra.py` | Se ejecuta en la **nube de Claude**: comprobaciones automáticas del QC. |
+| `scripts/entradas.py` | Resuelve las entradas de cada workflow (`workflow_dispatch` o `lanzamiento/<workflow>.json`). |
+| `.github/actions/preparar-runner/action.yml` | Blender exacto (caché + SHA-256), dependencias, ffmpeg y `.blend` verificado. |
+| `lanzamiento/*.json` | Solo en ramas de trabajo: un push que lo cambie lanza el workflow del mismo nombre. |
 
 ## Flujo
 

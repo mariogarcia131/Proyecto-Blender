@@ -1,0 +1,115 @@
+name: Preparar runner de render
+description: >-
+  Instala la versión exacta de Blender de render_config.json (caché + SHA-256), las dependencias
+  del sistema y ffmpeg, registra el hardware del runner y, opcionalmente, descarga el .blend de la
+  Release de transporte verificando su SHA-256 (docs/ESTRATEGIA_RENDER.md, secciones c y d).
+inputs:
+  config:
+    description: Ruta de render_config.json
+    default: render_config.json
+  descargar_blend:
+    description: "'true' para descargar y verificar el .blend de la Release de transporte"
+    default: "true"
+  instalar_blender:
+    description: "'false' para instalar solo ffmpeg (trabajos de montaje)"
+    default: "true"
+outputs:
+  blender:
+    description: Ruta del ejecutable de Blender
+    value: ${{ steps.cfg.outputs.blender_bin }}
+  blend:
+    description: Ruta local del .blend verificado
+    value: ${{ steps.cfg.outputs.blend_local }}
+runs:
+  using: composite
+  steps:
+    - name: Leer la configuración
+      id: cfg
+      shell: bash
+      run: |
+        python3 - "${{ inputs.config }}" <<'PY' >> "$GITHUB_OUTPUT"
+        import sys
+        sys.path.insert(0, "scripts")
+        import plan_chunks as pc
+        c = pc.cargar_config(sys.argv[1])
+        b = c["blender"]
+        print(f"version={b['version']}")
+        print(f"url={b['url']}")
+        print(f"sha256={b['sha256']}")
+        print(f"tarball={b['url'].rsplit('/', 1)[-1]}")
+        print(f"blend_url={c['blend']['url']}")
+        print(f"blend_sha256={c['blend']['sha256']}")
+        PY
+        echo "blender_bin=$RUNNER_TEMP/blender/blender" >> "$GITHUB_OUTPUT"
+        echo "blend_local=$RUNNER_TEMP/escena.blend" >> "$GITHUB_OUTPUT"
+        mkdir -p "$RUNNER_TEMP/cache-blender"
+
+    - name: Recuperar el tarball de Blender de la caché
+      if: inputs.instalar_blender == 'true'
+      id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/cache-blender/${{ steps.cfg.outputs.tarball }}
+        key: blender-${{ steps.cfg.outputs.version }}-${{ steps.cfg.outputs.sha256 }}
+
+    - name: Descargar Blender (fallo de caché)
+      if: inputs.instalar_blender == 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl -fL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/cache-blender/${{ steps.cfg.outputs.tarball }}" "${{ steps.cfg.outputs.url }}"
+
+    - name: Verificar el SHA-256 del tarball
+      if: inputs.instalar_blender == 'true'
+      shell: bash
+      run: |
+        echo "${{ steps.cfg.outputs.sha256 }}  $RUNNER_TEMP/cache-blender/${{ steps.cfg.outputs.tarball }}" | sha256sum -c -
+
+    - name: Guardar el tarball en la caché
+      if: inputs.instalar_blender == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      continue-on-error: true   # otro trabajo de la matriz puede haberla guardado ya
+      with:
+        path: ${{ runner.temp }}/cache-blender/${{ steps.cfg.outputs.tarball }}
+        key: blender-${{ steps.cfg.outputs.version }}-${{ steps.cfg.outputs.sha256 }}
+
+    - name: Extraer Blender y borrar el tarball
+      if: inputs.instalar_blender == 'true'
+      shell: bash
+      run: |
+        mkdir -p "$RUNNER_TEMP/blender"
+        tar -xf "$RUNNER_TEMP/cache-blender/${{ steps.cfg.outputs.tarball }}" -C "$RUNNER_TEMP/blender" --strip-components=1
+        rm -f "$RUNNER_TEMP/cache-blender/${{ steps.cfg.outputs.tarball }}"
+
+    - name: Dependencias del sistema y ffmpeg
+      shell: bash
+      run: |
+        faltan=""
+        if [ "${{ inputs.instalar_blender }}" = "true" ]; then
+          for p in libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 libsm6 libgl1 libegl1; do
+            dpkg -s "$p" > /dev/null 2>&1 || faltan="$faltan $p"
+          done
+        fi
+        command -v ffmpeg > /dev/null || faltan="$faltan ffmpeg"
+        command -v zip > /dev/null || faltan="$faltan zip"
+        if [ -n "$faltan" ]; then
+          echo "Instalando:$faltan"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends $faltan
+        fi
+        ffmpeg -hide_banner -version | head -1
+
+    - name: Registrar el hardware del runner
+      shell: bash
+      run: |
+        if [ "${{ inputs.instalar_blender }}" = "true" ]; then "$RUNNER_TEMP/blender/blender" --version | head -3; fi
+        echo "nproc: $(nproc)"
+        free -g
+        df -h "$RUNNER_TEMP" /
+        lscpu | grep -E "Model name|^CPU\(s\)|Thread|MHz" || true
+
+    - name: Descargar el .blend de la Release de transporte
+      if: inputs.descargar_blend == 'true'
+      shell: bash
+      run: |
+        curl -fL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/escena.blend" "${{ steps.cfg.outputs.blend_url }}"
+        echo "${{ steps.cfg.outputs.blend_sha256 }}  $RUNNER_TEMP/escena.blend" | sha256sum -c -

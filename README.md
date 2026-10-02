@@ -8,8 +8,9 @@ GitHub Actions y entregarlos mediante enlaces de descarga temporales.
 
 Primer objetivo: **«Vídeo Fase 3»** a partir de `Avion_Fase_3_Cabina.blend` (~70 MB).
 
-> **Estado:** estrategia documentada y plantilla de configuración lista. Los workflows y scripts
-> se implementarán siguiendo [`docs/ESTRATEGIA_RENDER.md`](docs/ESTRATEGIA_RENDER.md).
+> **Estado:** estrategia, workflows (`benchmark.yml`, `render.yml`, `entrega.yml`) y scripts
+> implementados según [`docs/ESTRATEGIA_RENDER.md`](docs/ESTRATEGIA_RENDER.md) y probados de
+> extremo a extremo con una escena sintética.
 
 ## Quién hace qué
 

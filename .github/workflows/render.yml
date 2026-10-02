@@ -1,0 +1,369 @@
+# Render distribuido del vídeo y de las fotos (docs/ESTRATEGIA_RENDER.md, secciones b, f–k).
+#   plan (+ relevo) → render (matriz de trozos y lotes de fotos) → assemble
+name: render
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "full · resume · assemble · fotos · parche"
+        default: full
+      parte:
+        description: "Parte del vídeo (≥ 1)"
+        default: "1"
+      runs_previos:
+        description: "IDs de ejecuciones previas separados por comas (resume, assemble, parche, partes ≥ 2)"
+        default: ""
+      frames_por_trozo:
+        description: "Sobrescribe troceo.frames_por_trozo en esta ejecución (opcional)"
+        default: ""
+      rehacer_frames:
+        description: "Solo parche: frames a rehacer, p. ej. 1201-1210,1500"
+        default: ""
+      conservar_transporte:
+        description: "true = no borrar la Release de transporte al terminar"
+        default: "false"
+  push:
+    branches: ["claude/**"]
+    paths: ["lanzamiento/render.json"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  entradas:
+    runs-on: ubuntu-latest
+    outputs:
+      modo: ${{ steps.e.outputs.modo }}
+      parte: ${{ steps.e.outputs.parte }}
+      runs_previos: ${{ steps.e.outputs.runs_previos }}
+      frames_por_trozo: ${{ steps.e.outputs.frames_por_trozo }}
+      rehacer_frames: ${{ steps.e.outputs.rehacer_frames }}
+      conservar_transporte: ${{ steps.e.outputs.conservar_transporte }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: e
+        env:
+          EVENTO: ${{ github.event_name }}
+          INPUTS_JSON: ${{ toJSON(github.event.inputs) }}
+        run: python3 scripts/entradas.py render
+
+  plan:
+    needs: entradas
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      trozos: ${{ steps.p.outputs.trozos }}
+      num_trozos: ${{ steps.p.outputs.num_trozos }}
+      ultima: ${{ steps.p.outputs.ultima }}
+      partes: ${{ steps.p.outputs.partes }}
+      relevo: ${{ steps.r.outputs.nombre }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Relevo de artefactos de ejecuciones previas
+        id: r
+        if: needs.entradas.outputs.runs_previos != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNS: ${{ needs.entradas.outputs.runs_previos }}
+        run: |
+          R="$RUNNER_TEMP/relevo"; mkdir -p "$R"
+          total=0
+          for run in ${RUNS//,/ }; do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.expired == false) | select(.name | test("^(segmento|manifest|foto|relevo|parte)-")) | "\(.id) \(.size_in_bytes) \(.name)"' \
+              > "$RUNNER_TEMP/lista-$run.txt"
+            n_cad="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" --jq '[.artifacts[] | select(.expired)] | length')"
+            [ "$n_cad" = "0" ] || echo "::warning::Run $run: $n_cad artefacto(s) caducado(s); sus frames se volverán a renderizar."
+            total=$(( total + $(awk '{s+=$2} END{print s+0}' "$RUNNER_TEMP/lista-$run.txt") ))
+          done
+          libre=$(( $(df -Pk "$RUNNER_TEMP" | awk 'NR==2{print $4}') * 1024 ))
+          if [ "$total" -gt $(( libre * 70 / 100 )) ]; then
+            echo "::error::El relevo ocupa $total B y supera el 70 % del disco libre ($libre B)."; exit 1
+          fi
+          for run in ${RUNS//,/ }; do
+            while read -r id tam nombre; do
+              [ -n "$id" ] || continue
+              mkdir -p "$R/$run/$nombre"
+              gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$RUNNER_TEMP/a.zip"
+              unzip -oq "$RUNNER_TEMP/a.zip" -d "$R/$run/$nombre" && rm -f "$RUNNER_TEMP/a.zip"
+            done < "$RUNNER_TEMP/lista-$run.txt"
+          done
+          echo "nombre=relevo-${RUNS//,/_}" >> "$GITHUB_OUTPUT"
+          echo "Relevo: $(find "$R" -type f | wc -l) archivos, $(du -sh "$R" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Subir el relevo a esta ejecución
+        if: needs.entradas.outputs.runs_previos != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.r.outputs.nombre }}
+          path: ${{ runner.temp }}/relevo/
+          retention-days: 1
+          compression-level: 0
+      - name: Plan de trozos
+        id: p
+        env:
+          MODO: ${{ needs.entradas.outputs.modo }}
+          PARTE: ${{ needs.entradas.outputs.parte }}
+          FPT: ${{ needs.entradas.outputs.frames_por_trozo }}
+          REHACER: ${{ needs.entradas.outputs.rehacer_frames }}
+        run: |
+          args=(--config render_config.json --modo "$MODO" --parte "$PARTE" --manifiestos "$RUNNER_TEMP/relevo")
+          [ -n "$FPT" ] && args+=(--frames-por-trozo "$FPT")
+          [ -n "$REHACER" ] && args+=(--rehacer "$REHACER")
+          python3 scripts/plan_chunks.py "${args[@]}" > plan.json
+          echo "trozos=$(jq -c '[.trozos[] | {tipo, indice, nombre, rangos_txt, fotos_txt, frames}]' plan.json)" >> "$GITHUB_OUTPUT"
+          echo "num_trozos=$(jq .num_trozos plan.json)" >> "$GITHUB_OUTPUT"
+          echo "ultima=$(jq .ultima plan.json)" >> "$GITHUB_OUTPUT"
+          echo "partes=$(jq .partes plan.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Plan — modo \`$MODO\`, parte $PARTE de $(jq .partes plan.json)"
+            echo ""
+            echo "Huella de render \`$(jq -r .huella_render plan.json)\` · frames por trozo **$(jq .frames_por_trozo plan.json)** ($(jq -r .origen_frames_por_trozo plan.json))"
+            echo ""
+            echo "Rango de la parte: $(jq -c .rango_parte plan.json) · frames pendientes $(jq .frames_pendientes plan.json) · trabajos **$(jq .num_trozos plan.json)** · oleadas **$(jq .oleadas plan.json)** · ≈ $(jq .horas_estimadas plan.json) h reales"
+            echo ""
+            echo "| Trabajo | Tipo | Frames / fotos |"
+            echo "|---|---|---|"
+            jq -r '.trozos[] | "| \(.nombre) | \(.tipo) | \(.rangos_txt // .fotos_txt) |"' plan.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  render:
+    needs: [entradas, plan]
+    if: needs.plan.outputs.num_trozos != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        trozo: ${{ fromJSON(needs.plan.outputs.trozos) }}
+    env:
+      NOMBRE: ${{ matrix.trozo.nombre }}
+      SUF: ${{ matrix.trozo.nombre }}-a${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: prep
+        uses: ./.github/actions/preparar-runner
+      - name: Recuperar intentos previos de esta ejecución
+        if: github.run_attempt > 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/frames" "$RUNNER_TEMP/previos"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq ".artifacts[] | select(.expired == false) | select(.name | test(\"^(frames|manifest|foto)-$NOMBRE-a[0-9]+$\")) | \"\(.id) \(.name)\"" |
+          while read -r id nombre; do
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$RUNNER_TEMP/a.zip"
+            case "$nombre" in
+              manifest-*) unzip -oq "$RUNNER_TEMP/a.zip" -d "$RUNNER_TEMP/previos/$nombre" ;;
+              *) unzip -oq "$RUNNER_TEMP/a.zip" -d "$RUNNER_TEMP/frames"
+                 find "$RUNNER_TEMP/frames" -name 'manifest-*.json' -exec mv {} "$RUNNER_TEMP/previos/" \; ;;
+            esac
+            rm -f "$RUNNER_TEMP/a.zip"
+            echo "Recuperado $nombre"
+          done
+      - name: Render
+        timeout-minutes: 330
+        run: |
+          export RENDER_PASO_INICIO="$(date +%s)"
+          if [ "${{ matrix.trozo.tipo }}" = "fotos" ]; then SEL=(--fotos "${{ matrix.trozo.fotos_txt }}"); else SEL=(--rangos "${{ matrix.trozo.rangos_txt }}"); fi
+          mkdir -p "$RUNNER_TEMP/frames" "$RUNNER_TEMP/previos" "$RUNNER_TEMP/manifest"
+          "${{ steps.prep.outputs.blender }}" -b "${{ steps.prep.outputs.blend }}" --factory-startup -noaudio -t 4 --python-exit-code 1 \
+            -P scripts/render_chunk.py -- --config render_config.json --trozo "$NOMBRE" \
+            "${SEL[@]}" --salida "$RUNNER_TEMP/frames" --previos "$RUNNER_TEMP/previos" \
+            --manifiesto "$RUNNER_TEMP/manifest/manifest-$NOMBRE.json"
+      - name: Segmentos MP4
+        if: always() && matrix.trozo.tipo == 'video'
+        run: |
+          m="$RUNNER_TEMP/manifest/manifest-$NOMBRE.json"
+          [ -f "$m" ] || { echo "Sin manifiesto: no hay segmento."; exit 0; }
+          scripts/assemble.sh --codificar-trozo --config render_config.json --frames "$RUNNER_TEMP/frames" \
+            --manifiesto "$m" --salida "$RUNNER_TEMP/segmentos" --bordes "$RUNNER_TEMP/bordes"
+      - name: Preparar las fotos para subir
+        if: always() && matrix.trozo.tipo == 'fotos'
+        run: |
+          mkdir -p "$RUNNER_TEMP/fotos"
+          find "$RUNNER_TEMP/frames" -maxdepth 1 -name '*.png' ! -name '*.tmp.png' -exec mv {} "$RUNNER_TEMP/fotos/" \;
+          cp "$RUNNER_TEMP/manifest/manifest-$NOMBRE.json" "$RUNNER_TEMP/fotos/" 2>/dev/null || true
+      - name: Subir manifiesto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-${{ env.SUF }}
+          path: ${{ runner.temp }}/manifest/
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Subir frames
+        if: always() && matrix.trozo.tipo == 'video'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frames-${{ env.SUF }}
+          path: ${{ runner.temp }}/frames/frame_*[0-9].png
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Subir segmentos
+        if: always() && matrix.trozo.tipo == 'video'
+        uses: actions/upload-artifact@v4
+        with:
+          name: segmento-${{ env.SUF }}
+          path: ${{ runner.temp }}/segmentos/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Subir bordes (PNG de la muestra de QC)
+        if: always() && matrix.trozo.tipo == 'video'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bordes-${{ env.SUF }}
+          path: ${{ runner.temp }}/bordes/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Subir fotos
+        if: always() && matrix.trozo.tipo == 'fotos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: foto-${{ env.SUF }}
+          path: ${{ runner.temp }}/fotos/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Resumen
+        if: always()
+        run: |
+          m="$RUNNER_TEMP/manifest/manifest-$NOMBRE.json"
+          [ -f "$m" ] || { echo "### $NOMBRE: sin manifiesto" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "### $NOMBRE — $(jq -r .estado "$m")"
+            jq -r '"Hechos: \(((.frames_completados // []) + (.fotos_completadas // [])) | length) · fallidos: \(((.frames_fallidos // []) + (.fotos_fallidas // [])) | length) · s/frame máx \(.s_por_frame_max // "-") · medio \(.s_por_frame_medio // "-") · CPU \(.cpu) · carga \(.t_carga_s) s"' "$m"
+            echo "Disco libre: $(df -h "$RUNNER_TEMP" | awk 'NR==2{print $4}')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  assemble:
+    needs: [entradas, plan, render]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      actions: write
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODO: ${{ needs.entradas.outputs.modo }}
+      PARTE: ${{ needs.entradas.outputs.parte }}
+      ULTIMA: ${{ needs.plan.outputs.ultima }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/preparar-runner
+        with:
+          instalar_blender: "false"
+          descargar_blend: "false"
+      - name: Descargar segmentos, manifiestos, fotos y relevos de esta ejecución
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "{segmento,manifest,foto,relevo}-*"
+          path: ${{ runner.temp }}/dl
+      - name: Montaje
+        run: |
+          mkdir -p "$RUNNER_TEMP/dl"
+          args=(--config render_config.json --segmentos "$RUNNER_TEMP/dl" --manifiestos "$RUNNER_TEMP/dl"
+                --fotos "$RUNNER_TEMP/dl" --parte "$PARTE" --salida "$RUNNER_TEMP/montaje" --run-id "$GITHUB_RUN_ID")
+          [ "$ULTIMA" = "true" ] && args+=(--ultima)
+          [ "$MODO" = "parche" ] && args+=(--parche "${{ needs.entradas.outputs.rehacer_frames }}")
+          [ "$MODO" = "fotos" ] && args+=(--solo-fotos)
+          scripts/assemble.sh "${args[@]}"
+      - name: Subir el maestro de la parte
+        uses: actions/upload-artifact@v4
+        with:
+          name: parte-${{ needs.entradas.outputs.parte }}
+          path: |
+            ${{ runner.temp }}/montaje/parte-*.mp4
+            ${{ runner.temp }}/montaje/parte-*.json
+            ${{ runner.temp }}/montaje/maestros_nuevos/parte-*
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Lanzar la parte siguiente
+        if: needs.plan.outputs.ultima != 'true'
+        run: |
+          sig=$(( PARTE + 1 ))
+          if gh workflow run render.yml --ref "$GITHUB_REF_NAME" -f modo=full -f parte="$sig" -f runs_previos="$GITHUB_RUN_ID"; then
+            echo "Parte $sig lanzada (runs_previos=$GITHUB_RUN_ID)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::No se pudo lanzar la parte $sig con workflow_dispatch; lánzala con modo=full, parte=$sig, runs_previos=$GITHUB_RUN_ID (o lanzamiento/render.json)."
+            echo "⚠️ Lanzar a mano la parte $sig: \`modo=full parte=$sig runs_previos=$GITHUB_RUN_ID\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Copia del .blend para la entrega
+        if: needs.plan.outputs.ultima == 'true'
+        run: |
+          eval "$(python3 -c '
+          import sys, shlex; sys.path.insert(0, "scripts"); import plan_chunks as pc
+          c = pc.cargar_config("render_config.json")
+          print("URL=" + shlex.quote(c["blend"]["url"])); print("SHA=" + c["blend"]["sha256"]); print("NOMBRE=" + shlex.quote(c["entrega"]["nombre_blend"]))')"
+          mkdir -p "$RUNNER_TEMP/blend-final"
+          curl -fL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/blend-final/$NOMBRE" "$URL"
+          echo "$SHA  $RUNNER_TEMP/blend-final/$NOMBRE" | sha256sum -c -
+      - name: Subir vídeo final
+        if: needs.plan.outputs.ultima == 'true' && needs.entradas.outputs.modo != 'fotos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-final
+          path: ${{ runner.temp }}/montaje/*.mp4
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - name: Subir fotos finales
+        if: needs.plan.outputs.ultima == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fotos-final
+          path: ${{ runner.temp }}/montaje/*.zip
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
+      - name: Subir .blend final
+        if: needs.plan.outputs.ultima == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: blend-final
+          path: ${{ runner.temp }}/blend-final/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Subir manifiesto final
+        if: needs.plan.outputs.ultima == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifiesto-final
+          path: ${{ runner.temp }}/montaje/manifiesto_final.json
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Subir muestra de QC
+        if: needs.plan.outputs.ultima == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: muestra-qc
+          path: ${{ runner.temp }}/montaje/muestra-qc/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - name: Borrar intermedios y la Release de transporte
+        if: needs.plan.outputs.ultima == 'true'
+        run: |
+          scripts/limpieza.sh --intermedios todos
+          if [ "${{ needs.entradas.outputs.conservar_transporte }}" != "true" ]; then
+            TAG="$(python3 -c 'import sys; sys.path.insert(0, "scripts"); import plan_chunks as pc; print(pc.cargar_config("render_config.json")["blend"]["release_tag"])')"
+            scripts/limpieza.sh --release "$TAG"
+            echo "Release de transporte \`$TAG\` borrada." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Intermedios borrados. Quedan solo \`parte-*\` y los artefactos finales (24 h). **QC pendiente.**" >> "$GITHUB_STEP_SUMMARY"

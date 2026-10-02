@@ -1,0 +1,93 @@
+# Entrega tras el QC aprobado en la nube de Claude y limpieza final
+# (docs/ESTRATEGIA_RENDER.md, secciones m y n).   entrega → limpieza
+name: entrega
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_montaje:
+        description: "ID de la ejecución de render.yml cuyo assemble generó los artefactos finales"
+        default: ""
+      qc_aprobado:
+        description: "true solo si la nube de Claude aprobó el QC"
+        default: "false"
+      qc_resumen:
+        description: "2–4 líneas con lo revisado"
+        default: ""
+      servicio:
+        description: "temp.sh · litterbox"
+        default: temp.sh
+      solo_limpieza:
+        description: "true = no entregar nada y limpiar"
+        default: "false"
+  push:
+    branches: ["claude/**"]
+    paths: ["lanzamiento/entrega.json"]
+
+permissions:
+  contents: read
+
+jobs:
+  entradas:
+    runs-on: ubuntu-latest
+    outputs:
+      run_montaje: ${{ steps.e.outputs.run_montaje }}
+      qc_aprobado: ${{ steps.e.outputs.qc_aprobado }}
+      qc_resumen: ${{ steps.e.outputs.qc_resumen }}
+      servicio: ${{ steps.e.outputs.servicio }}
+      solo_limpieza: ${{ steps.e.outputs.solo_limpieza }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: e
+        env:
+          EVENTO: ${{ github.event_name }}
+          INPUTS_JSON: ${{ toJSON(github.event.inputs) }}
+        run: python3 scripts/entradas.py entrega
+
+  entrega:
+    needs: entradas
+    if: needs.entradas.outputs.solo_limpieza != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comprobar el QC
+        run: |
+          if [ "${{ needs.entradas.outputs.qc_aprobado }}" != "true" ]; then
+            echo "::error::QC no aprobado: no se entrega nada."; exit 1
+          fi
+          [ -n "${{ needs.entradas.outputs.run_montaje }}" ] || { echo "::error::Falta run_montaje."; exit 1; }
+      - name: Descargar los artefactos finales
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "{video-final,fotos-final,blend-final,manifiesto-final}"
+          path: ${{ runner.temp }}/final
+          run-id: ${{ needs.entradas.outputs.run_montaje }}
+          github-token: ${{ github.token }}
+      - name: Subir, verificar y publicar enlaces
+        env:
+          QC_RESUMEN: ${{ needs.entradas.outputs.qc_resumen }}
+        run: |
+          ls -laR "$RUNNER_TEMP/final"
+          scripts/entrega.sh --config render_config.json --servicio "${{ needs.entradas.outputs.servicio }}" \
+            --archivos "$RUNNER_TEMP/final" --qc-resumen "$QC_RESUMEN" --salida "$RUNNER_TEMP/entrega.json"
+          echo "----- entrega.json -----"
+          cat "$RUNNER_TEMP/entrega.json"
+
+  limpieza:
+    needs: [entradas, entrega]
+    if: ${{ always() && (needs.entrega.result == 'success' || needs.entradas.outputs.solo_limpieza == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Limpieza final y verificación
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/limpieza.sh

@@ -32,6 +32,7 @@ Si la implementación y este documento discrepan, se corrige uno de los dos en e
 - [q) Checklist previa al lanzamiento](#q-checklist-previa-al-lanzamiento)
 - [Referencia de render_config.json](#referencia-de-render_configjson)
 - [Contratos entre componentes](#contratos-entre-componentes)
+- [r) Notas de implementación](#r-notas-de-implementación)
 
 ---
 
@@ -1048,3 +1049,31 @@ flowchart LR
     S6 --> S7["Subir artefactos<br/>retention 1 día, if always"]
     S7 --> S8["Resumen<br/>STEP_SUMMARY"]
 ```
+
+---
+
+## r) Notas de implementación
+
+- **Lanzamiento desde una rama de trabajo.** GitHub solo ofrece `workflow_dispatch` para workflows
+  presentes en la rama por defecto. Mientras los workflows vivan en una rama de trabajo, cada uno
+  se lanza también con un push que modifique `lanzamiento/<workflow>.json` (p. ej.
+  `lanzamiento/render.json` con `{"modo": "resume", "runs_previos": "123456789"}`); el primer
+  trabajo (`entradas`, `scripts/entradas.py`) resuelve las mismas entradas y valores por defecto
+  en los dos casos. Un push hecho con `GITHUB_TOKEN` no lanza workflows: si `assemble` no puede
+  lanzar la parte siguiente con `gh workflow run`, lo deja escrito en el resumen y la nube de
+  Claude la lanza con el archivo de lanzamiento.
+- **Variantes de benchmark.** `benchmark.yml` acepta `variantes` (lista JSON de
+  `{"nombre", "ajustes"}` fusionados sobre la config) para medir en una sola ejecución varias
+  resoluciones, fps o muestras y presentar opciones con tiempos reales. Cada variante tiene su
+  propia huella; el render final usa solo la configuración elegida.
+- **Muestra de QC sin descargar todos los PNG.** Cada trozo sube, además de sus frames, un
+  artefacto pequeño `bordes-cNNN-aK` con los dos primeros y los dos últimos PNG de cada segmento y
+  los frames fijos (inicio, fin, benchmark). `assemble` descarga solo los que necesita la muestra.
+  La muestra incluye también un frame JPG cada 5 s del MP4 final (`cada5s/`) y una miniatura de
+  cada foto (`fotos_previas/`).
+- **Color en los MP4.** RGB → YUV con matriz BT.709 y rango limitado, etiquetado BT.709 en el
+  segmento intermedio y en el MP4 final.
+- **Exposición por plano.** `color.exposicion` es global (huella). Si un vídeo necesita exposición
+  distinta por plano (exteriores de día frente a cabina de noche), se anima dentro del `.blend`
+  (p. ej. un nodo *Exposure* del compositor con un driver), que es inmutable gracias al SHA-256.
+- **Blender** se invoca con `--python-exit-code 1` para que una excepción en el script falle el paso.

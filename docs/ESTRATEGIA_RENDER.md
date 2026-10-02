@@ -1,39 +1,80 @@
 # Estrategia de render distribuido en GitHub Actions
 
 Documento maestro del proyecto AX620. Es la **especificación** que deben seguir
-`.github/workflows/benchmark.yml`, `.github/workflows/render.yml`, `scripts/render_chunk.py`,
-`scripts/plan_chunks.py`, `scripts/assemble.sh` y `render_config.json`.
+`.github/workflows/benchmark.yml`, `.github/workflows/render.yml`, `.github/workflows/entrega.yml`,
+`scripts/render_chunk.py`, `scripts/plan_chunks.py`, `scripts/assemble.sh`, `scripts/entrega.sh`,
+`scripts/limpieza.sh`, `scripts/qc_muestra.py` y `render_config.json`.
 Si la implementación y este documento discrepan, se corrige uno de los dos en el mismo commit.
 
-- **Fecha de verificación de los límites de GitHub:** 2026-10-02 (documentación oficial de GitHub Docs).
+- **Fecha de verificación de límites (GitHub y servicios de descarga):** 2026-10-02.
 - **Versión de Blender verificada:** 5.2.2 (tarball Linux x64 publicado el 15-09-2026 en download.blender.org).
 - **Convención numérica:** en el texto, separador de miles con punto y decimales con coma (16.200 s; 1,15). En código y JSON, notación inglesa (`16200`, `1.15`).
 
 ## Índice
 
+- [0) Reparto de roles y ciclo de vida](#0-reparto-de-roles-y-ciclo-de-vida)
 - [a) Recursos y límites](#a-recursos-y-límites)
 - [b) Arquitectura](#b-arquitectura)
-- [c) Distribución del .blend](#c-distribución-del-blend)
+- [c) Transporte temporal del .blend](#c-transporte-temporal-del-blend)
 - [d) Instalación y ejecución de Blender en el runner](#d-instalación-y-ejecución-de-blender-en-el-runner)
 - [e) Benchmark obligatorio](#e-benchmark-obligatorio)
-- [f) Cálculo de trozos](#f-cálculo-de-trozos)
+- [f) Cálculo de trozos y partes](#f-cálculo-de-trozos-y-partes)
 - [g) Ajustes de render comunes](#g-ajustes-de-render-comunes)
-- [h) Seguridad ante el corte de 6 h](#h-seguridad-ante-el-corte-de-6-h)
-- [i) Reanudación](#i-reanudación)
+- [h) Seguridad ante el corte de 6 h y artefactos](#h-seguridad-ante-el-corte-de-6-h-y-artefactos)
+- [i) Reanudación y relevo](#i-reanudación-y-relevo)
 - [j) Montaje final](#j-montaje-final)
 - [k) Fotos fijas](#k-fotos-fijas)
-- [l) Vigilancia y fallos](#l-vigilancia-y-fallos)
-- [m) Riesgos y normas](#m-riesgos-y-normas)
-- [n) Checklist previa al lanzamiento](#n-checklist-previa-al-lanzamiento)
+- [l) Control de calidad en la nube de Claude](#l-control-de-calidad-en-la-nube-de-claude)
+- [m) Entrega por servicio de descarga externo](#m-entrega-por-servicio-de-descarga-externo)
+- [n) Limpieza final](#n-limpieza-final)
+- [o) Vigilancia y fallos](#o-vigilancia-y-fallos)
+- [p) Riesgos y normas](#p-riesgos-y-normas)
+- [q) Checklist previa al lanzamiento](#q-checklist-previa-al-lanzamiento)
 - [Referencia de render_config.json](#referencia-de-render_configjson)
 - [Contratos entre componentes](#contratos-entre-componentes)
 
 ---
 
+## 0) Reparto de roles y ciclo de vida
+
+| Quién | Hace | No hace |
+|---|---|---|
+| **Nube de Claude** (sesiones de Claude Code en la nube; 2 núcleos, sin GPU) | **Todo el trabajo creativo y de control:** inspección del `.blend`, modelado, cámaras, animación, previsualizaciones rápidas (Eevee o pocas muestras), preparación de `render_config.json`, lanzamiento y vigilancia de workflows (herramientas MCP de GitHub), **control de calidad** de la muestra y entrega de los enlaces al usuario. | Renders finales de vídeo o fotos (demasiado lentos aquí). |
+| **GitHub Actions** (runners estándar, repo público) | **Exclusivamente potencia de cálculo:** renderizar frames y fotos, codificar, montar, subir la entrega al servicio externo y limpiar. | Decidir nada creativo, modificar el `.blend` ni guardar resultados. |
+| **Repositorio** | Código, workflows, documentación y `render_config.json`. | **No almacena resultados**: ni `.blend`, ni frames, ni vídeos, ni fotos. Releases y artefactos son solo transporte temporal y se borran. |
+| **Servicio de descarga externo** (temp.sh; alternativa Litterbox) | Alojar durante 3 días el MP4 final, el ZIP de fotos, el `.blend` final y `entrega.json`, y también el `.blend` de entrada para el transporte. | Almacenamiento permanente. |
+
+### Ciclo de vida de un vídeo
+
+```mermaid
+flowchart TD
+    C1["Nube de Claude<br/>modelado, cámaras, animación"] -->|"curl a temp.sh"| C2["Enlace temporal<br/>del .blend + SHA-256"]
+    C2 --> B1["benchmark.yml: transporte<br/>Release temporal con el .blend"]
+    B1 --> B2["benchmark.yml<br/>3-5 frames representativos"]
+    B2 --> R1["render.yml<br/>plan, render en matriz, assemble"]
+    R1 -->|"faltan frames"| R2["render.yml modo resume<br/>relevo de artefactos"]
+    R2 --> R1
+    R1 -->|"montaje validado"| R3["Borra frames, segmentos, fotos intermedias<br/>y la Release de transporte"]
+    R3 --> Q1["Nube de Claude: QC<br/>descarga muestra-qc y revisa"]
+    Q1 -->|"rechazado"| C1
+    Q1 -->|"aprobado"| E1["entrega.yml<br/>sube MP4, ZIP fotos y .blend a temp.sh"]
+    E1 --> E2["Enlaces en STEP_SUMMARY<br/>y entrega.json"]
+    E2 --> L1["limpieza<br/>0 Releases, 0 artefactos, 0 cachés"]
+    L1 --> C3["Nube de Claude verifica enlaces<br/>y los entrega al usuario"]
+```
+
+**Estado final obligatorio del repositorio:** sin Releases, sin tags, sin artefactos, sin
+cachés y sin binarios en Git. Solo quedan el código, la documentación y los logs de las
+ejecuciones (texto, sin secretos).
+
+---
+
 ## a) Recursos y límites
 
-Todos los valores se han comprobado en la documentación oficial de GitHub el **2026-10-02**.
+Todos los valores se han comprobado en la documentación oficial el **2026-10-02**.
 ⚠️ marca un valor que **ha cambiado** respecto a los datos de partida del proyecto.
+
+### GitHub
 
 | Límite | Valor | Consecuencia práctica | Verificado |
 |---|---|---|---|
@@ -41,49 +82,80 @@ Todos los valores se han comprobado en la documentación oficial de GitHub el **
 | Runner `ubuntu-latest` en repo público | **4 vCPU, 16 GB de RAM, 14 GB de SSD**, x64, Ubuntu 24.04, **sin GPU** | Cycles solo en CPU con 4 hilos. Disco ajustado: hay que presupuestar Blender + `.blend` + PNG + segmento. | 2026-10-02 |
 | Runner `ubuntu-latest` en repo privado (referencia) | 2 vCPU, 8 GB de RAM, 14 GB de SSD | Si el repo pasara a privado tendríamos la mitad de CPU **y** consumiríamos minutos de pago. No hacerlo. | 2026-10-02 |
 | Tiempo máximo por trabajo (job) | **6 h**; al llegar, el trabajo se termina y falla | Cada trozo se planifica a **4 h 30 min** de render útil y el paso de render se corta a **5 h 30 min** (`timeout-minutes: 330`). | 2026-10-02 |
-| Duración máxima de una ejecución de workflow | **35 días** (incluye esperas en cola y aprobaciones) | Un vídeo de muchas oleadas cabe en una sola ejecución. | 2026-10-02 |
-| Trabajos por matriz | **256** por ejecución | Si un vídeo necesita más de 256 trozos, se lanza en varias **tandas** (ejecuciones). | 2026-10-02 |
+| Duración máxima de una ejecución de workflow | **35 días** (incluye esperas en cola y aprobaciones) | No es el límite que nos condiciona: lo es la retención de 1 día de los artefactos (ver [f)](#f-cálculo-de-trozos-y-partes)). | 2026-10-02 |
+| Trabajos por matriz | **256** por ejecución | Nunca se alcanza: cada parte tiene como máximo 60 trozos. | 2026-10-02 |
 | Concurrencia (plan Free) | **20 trabajos simultáneos** (de ellos, máx. 5 de macOS), a nivel de **cuenta/plan**, no de repositorio | `max-parallel: 20`. El trabajo 21 en adelante espera en cola. Crear más repositorios **no** da más concurrencia. Cualquier otro workflow de la cuenta compite por esos 20 huecos. | 2026-10-02 |
 | Re-ejecuciones | Máx. **50** re-ejecuciones por ejecución de workflow | "Re-run failed jobs" tiene tope. Si se agota, se usa el modo `resume` en una ejecución nueva. | 2026-10-02 |
-| Retención de artefactos y logs | **90 días** por defecto; en repos públicos configurable entre **1 y 90 días** | Montar y publicar el vídeo antes de 90 días. Los PNG se suben con `retention-days: 7`; manifiestos y segmentos con 90. | 2026-10-02 |
-| Almacenamiento de artefactos | Sin coste en repos públicos (la cuota de 500 MB del plan Free es para privados) | Aun así, PNG con retención corta por uso razonable. | 2026-10-02 |
-| Caché (`actions/cache`) | **10 GB** por repositorio | Cachear el tarball de Blender (383.295.504 bytes ≈ 366 MiB para 5.2.2) cabe de sobra. | 2026-10-02 |
+| Retención de artefactos y logs | **90 días** por defecto; en repos públicos configurable entre **1 y 90 días** | Usamos **`retention-days: 1` en todos los artefactos** y además se borran explícitamente. Ventana de trabajo de 24 h desde cada subida. | 2026-10-02 |
+| Almacenamiento de artefactos | Sin coste en repos públicos (la cuota de 500 MB del plan Free es para privados) | Aun así, retención de 1 día y borrado activo: el repo no guarda resultados. | 2026-10-02 |
+| Caché (`actions/cache`) | **10 GB** por repositorio | Cacheamos el tarball de Blender (383.295.504 bytes ≈ 366 MiB para 5.2.2) durante el render; la limpieza final borra la caché. | 2026-10-02 |
 | Tamaño de archivo en Git | Aviso a partir de **50 MiB**, bloqueo a partir de **100 MiB** (25 MiB vía navegador) | El `.blend` (~70 MB) no entra en Git. | 2026-10-02 |
 | Git LFS, plan Free | ⚠️ **10 GiB de almacenamiento y 10 GiB/mes de ancho de banda** (antes ~1 GB + 1 GB/mes). Sin método de pago, al superarlo LFS se desactiva hasta el mes siguiente | **Sigue sin servir:** un vídeo de 59 trozos descarga 59 × 70 MB = 4.130 MB ≈ 3,85 GiB; con 2–3 vídeos al mes (más benchmarks y *resumes*) se agota la cuota y LFS queda bloqueado en todo el repositorio. Las Releases no tienen ese límite. | ⚠️ 2026-10-02 |
-| Assets de Release | Cada archivo **< 2 GiB**; hasta **1.000** assets por Release; **sin límite** de tamaño total ni de ancho de banda | Canal de distribución del `.blend` y de los vídeos/fotos finales. | 2026-10-02 |
-| Normas de uso de Actions | En runners de GitHub, prohibida "cualquier actividad no relacionada con la producción, prueba, despliegue o publicación del proyecto de software asociado al repositorio" y cualquier carga desproporcionada | Solo se renderiza **este** proyecto, de forma puntual. Ver [m)](#m-riesgos-y-normas). | 2026-10-02 |
+| Assets de Release | Cada archivo **< 2 GiB**; hasta **1.000** assets por Release; **sin límite** de tamaño total ni de ancho de banda | Transporte temporal del `.blend` hacia los runners (y nada más). | 2026-10-02 |
+| `GITHUB_TOKEN` y `workflow_dispatch` | Los eventos creados con `GITHUB_TOKEN` no lanzan workflows, **salvo** `workflow_dispatch` y `repository_dispatch` | Una parte puede lanzar la siguiente con `gh workflow run` sin tokens personales (`permissions: actions: write`). | 2026-10-02 |
+| Normas de uso de Actions | En runners de GitHub, prohibida "cualquier actividad no relacionada con la producción, prueba, despliegue o publicación del proyecto de software asociado al repositorio" y cualquier carga desproporcionada | Solo se renderiza **este** proyecto, de forma puntual. Ver [p)](#p-riesgos-y-normas). | 2026-10-02 |
 
 Fuentes: GitHub Docs — *Actions limits*, *GitHub-hosted runners reference*, *GitHub Actions billing*,
 *Removing workflow artifacts*, *Configuring the retention period…*, *About large files on GitHub*,
-*Git LFS billing*, *About releases*, *GitHub Terms for Additional Products and Features*.
+*Git LFS billing*, *About releases*, *Triggering a workflow*, *GitHub Terms for Additional Products and Features*.
+
+### Servicios de descarga externos
+
+Requisitos: sin cuenta, con API usable con `curl`, tamaño suficiente para un MP4 4K y
+conservación de al menos unos días. Comprobados el **2026-10-02** en sus webs oficiales y con
+una prueba real de subida y descarga (archivo de texto de prueba, SHA-256 idéntico a la vuelta)
+desde la nube de Claude.
+
+| Servicio | Papel | Tamaño máx. | Conservación | Cuenta | Subida | Descarga por script |
+|---|---|---|---|---|---|---|
+| **[temp.sh](https://temp.sh/)** | **Elegido** | **4 GB** por archivo | **3 días** (fijo) | No | `curl -F "file=@archivo" https://temp.sh/upload` → devuelve la URL | `curl -X POST -o archivo <url>` (con GET devuelve una página con botón de descarga, útil para humanos) |
+| **[Litterbox](https://litterbox.catbox.moe/)** (catbox.moe) | Alternativa | **1 GB** por archivo | 1 h, 12 h, 24 h o **72 h** (usamos `72h`) | No | `curl -F reqtype=fileupload -F time=72h -F "fileToUpload=@archivo" https://litterbox.catbox.moe/resources/internals/api.php` | `curl -L -o archivo <url>` (enlace directo) |
+
+Por qué **temp.sh**: es el único de los verificados que combina sin cuenta + API + **4 GB**
+(margen para un MP4 2160p60) + 3 días de conservación, y funciona desde los runners y desde la
+nube de Claude. Litterbox queda como alternativa porque da enlaces directos y es un servicio
+veterano, pero su límite de **1 GB** puede no bastar a 4K.
+
+Descartados el 2026-10-02: **0x0.st** (512 MiB y su portada rechaza explícitamente a clientes
+automáticos), **Pixeldrain** (la API exige clave de cuenta), **Gofile** (sin documentación oficial
+legible sin JavaScript; retención por inactividad no verificable).
+
+Ambos servicios **guardan la IP de subida** y los enlaces son **públicos** para quien los tenga.
+temp.sh es un proyecto personal sin acuerdo de servicio: por eso hay alternativa y verificación
+de cada subida (ver [m)](#m-entrega-por-servicio-de-descarga-externo)).
 
 ---
 
 ## b) Arquitectura
 
-**Un repositorio, un workflow de render con matriz.** Nada de repositorios auxiliares ni
-cuentas adicionales.
+**Un repositorio y tres workflows.** Nada de repositorios auxiliares ni cuentas adicionales.
+
+| Workflow | Trabajos | Lo lanza |
+|---|---|---|
+| `.github/workflows/benchmark.yml` | `transporte` → `benchmark` (matriz, un frame por trabajo) → `resumen` | Nube de Claude (o el usuario) |
+| `.github/workflows/render.yml` | `plan` → `render` (matriz de trozos y fotos) → `assemble` | Nube de Claude; las partes 2…P las lanza la parte anterior |
+| `.github/workflows/entrega.yml` | `entrega` → `limpieza` | Nube de Claude **solo tras aprobar el QC** |
 
 ```mermaid
 flowchart LR
-    P["plan<br/>plan_chunks.py"] -->|"matriz JSON"| R0["render c000"]
+    P["plan<br/>plan_chunks.py + relevo"] -->|"matriz JSON"| R0["render c000"]
     P --> R1["render c001"]
-    P --> RN["render c0NN<br/>max-parallel 20"]
+    P --> RN["render c0NN / fotos<br/>max-parallel 20"]
     R0 --> A["assemble<br/>assemble.sh"]
     R1 --> A
     RN --> A
-    A -->|"MP4 validado"| REL["Release video-faseN-vX"]
+    A -->|"video-final, fotos-final,<br/>blend-final, muestra-qc"| QC["QC en la nube de Claude"]
 ```
 
-`render.yml` tiene tres trabajos:
+`render.yml`:
 
-| Trabajo | `runs-on` | Qué hace |
+| Trabajo | Permisos | Qué hace |
 |---|---|---|
-| `plan` | `ubuntu-latest` | Lee `render_config.json`, calcula la huella de render, decide los trozos (`full`) o los frames que faltan (`resume`) y expone la matriz como salida JSON. |
-| `render` | `ubuntu-latest` | `needs: plan`. `strategy.matrix.trozo: ${{ fromJSON(needs.plan.outputs.trozos) }}`, `fail-fast: false`, `max-parallel: 20`. Un trabajo por trozo. |
-| `assemble` | `ubuntu-latest` | `needs: render`, `if: ${{ !cancelled() }}`. Comprueba cobertura completa de frames, concatena segmentos, codifica, valida y publica. Si faltan frames, falla con la lista exacta y el comando de `resume`. |
+| `plan` | `actions: read` | Lee `render_config.json`, calcula la huella de render, decide los trozos (`full`), los frames que faltan (`resume`) o los frames a rehacer (`parche`); hace el **relevo** de artefactos de ejecuciones previas ([i)](#i-reanudación-y-relevo)) y expone la matriz como salida JSON. |
+| `render` | `actions: read` | `needs: plan`. `strategy.matrix.trozo: ${{ fromJSON(needs.plan.outputs.trozos) }}`, `fail-fast: false`, `max-parallel: 20`. Un trabajo por trozo de vídeo o por lote de fotos. |
+| `assemble` | `actions: write`, `contents: write` | `needs: render`, `if: ${{ !cancelled() }}`. Comprueba cobertura, monta la parte, y en la última parte codifica el MP4 final, crea el ZIP de fotos, la muestra de QC, borra intermedios y borra la Release de transporte. Si faltan frames, falla con la lista exacta y el comando de `resume`. |
 
-Esqueleto orientativo de la matriz (la implementación final vive en `render.yml`):
+Esqueleto orientativo de la matriz:
 
 ```yaml
 render:
@@ -99,79 +171,97 @@ render:
     # ... ver «Contratos entre componentes»
 ```
 
-Cada elemento de la matriz es un objeto, no un simple número, para que `resume` pueda
-mandar rangos no contiguos:
+Cada elemento de la matriz es un objeto, para que `resume` pueda mandar rangos no contiguos y
+para mezclar vídeo y fotos:
 
 ```json
-{ "indice": 7, "nombre": "c007", "rangos": [[323, 368]] }
+{ "tipo": "video", "indice": 7, "nombre": "c007", "rangos": [[323, 368]] }
+{ "tipo": "fotos", "indice": 0, "nombre": "l000", "fotos": ["cabina_frontal"] }
 ```
 
 Puntos clave:
 
 - **El límite de 6 h es por trabajo, no por cuenta ni por ejecución, y no se agota.** Cada trozo
   arranca con su propio reloj de 6 h. Si un vídeo necesita 300 h de CPU, se divide en
-  ~67 trozos de 4,5 h (300 ÷ 4,5 = 66,7 → 67). GitHub ejecuta 20 a la vez y encola el resto:
-  67 ÷ 20 = 3,35 → 4 oleadas. No hay que crear más repositorios ni hacer nada a mano.
+  ~67 trozos de 4,5 h (300 ÷ 4,5 = 66,7 → 67). GitHub ejecuta 20 a la vez y encola el resto.
+  No hay que crear más repositorios ni hacer nada a mano.
 - **La concurrencia es por cuenta.** `max-parallel: 20` llena todos los huecos del plan Free.
-  Mientras se renderiza, cualquier otro workflow de la cuenta (también de otros repositorios,
-  incluido `benchmark.yml`) espera en cola. Un vídeo a la vez.
-- **El trabajo 21 en adelante espera en cola automáticamente.** Cuando un trozo termina,
-  GitHub arranca el siguiente. Hablamos de "oleadas" para estimar, pero en realidad la cola es
-  continua.
-- **Tandas sucesivas.** Si hay más de 256 trozos (límite de matriz), `plan_chunks.py` los
-  numera globalmente y `render.yml` recibe la entrada `tanda` (1, 2, …): la tanda *k* procesa
-  los trozos `(k−1)·256` a `k·256 − 1`. Las tandas se lanzan una detrás de otra (la segunda cuando
-  la primera haya terminado o casi) y el montaje se hace con `modo=assemble` indicando todas
-  las ejecuciones. También se puede usar una tanda nueva para separar un vídeo largo en
-  sesiones de trabajo.
+  Mientras se renderiza, cualquier otro workflow de la cuenta (también de otros repositorios)
+  espera en cola. Un vídeo a la vez.
+- **El trabajo 21 en adelante espera en cola automáticamente.** Hablamos de "oleadas" para
+  estimar, pero en realidad la cola es continua.
+- **Partes sucesivas.** Como todos los artefactos caducan a las 24 h, una ejecución de render
+  no debe durar más de **18 h** de cota: como máximo **3 oleadas = 60 trozos** por ejecución
+  (3 × ~6 h en el peor caso). Si el vídeo necesita más, `plan_chunks.py` lo divide en **partes**
+  (rangos de frames consecutivos, de tamaño equilibrado) que se ejecutan una tras otra: al
+  terminar la parte *k*, su trabajo `assemble` lanza la parte *k+1* con
+  `gh workflow run render.yml -f modo=full -f parte=k+1 -f runs_previos=…` y el `plan` de la
+  nueva parte hace el relevo de los artefactos anteriores.
 - **Entradas de `render.yml` (`workflow_dispatch`):**
 
   | Entrada | Valores | Uso |
   |---|---|---|
-  | `modo` | `full` · `resume` · `assemble` · `fotos` | Tipo de ejecución. |
-  | `runs_previos` | IDs separados por comas | `resume` y `assemble`: ejecuciones cuyos manifiestos y segmentos se reutilizan. |
-  | `tanda` | entero ≥ 1 (por defecto 1) | Solo si hay más de 256 trozos. |
+  | `modo` | `full` · `resume` · `assemble` · `fotos` · `parche` | Tipo de ejecución. `fotos` solo si no hay vídeo; en `full` las fotos van en la última parte. |
+  | `parte` | entero ≥ 1 (por defecto 1) | Parte del vídeo que se renderiza. |
+  | `runs_previos` | IDs separados por comas | `resume`, `assemble`, `parche` y partes ≥ 2: ejecuciones cuyos artefactos se relevan. |
   | `frames_por_trozo` | entero (opcional) | Sobrescribe `troceo.frames_por_trozo` en esta ejecución (p. ej. −20 % en un `resume`). |
-  | `publicar` | `true` · `false` (por defecto `true`) | Si `false`, el MP4 queda solo como artefacto (revisión previa). |
+  | `rehacer_frames` | rangos, p. ej. `1201-1210,1500` | Solo `parche`: frames que se vuelven a renderizar tras un QC rechazado. |
+  | `conservar_transporte` | `true` · `false` (por defecto `false`) | Si `true`, `assemble` no borra la Release de transporte (para depurar). |
 
 - `concurrency: { group: render-${{ github.ref }}, cancel-in-progress: false }` a nivel de
-  workflow: nunca dos ejecuciones de render a la vez sobre la misma rama. No usar `concurrency`
-  a nivel de trabajo dentro de la matriz.
+  workflow: nunca dos ejecuciones de render a la vez. No usar `concurrency` a nivel de trabajo
+  dentro de la matriz.
+- La nube de Claude opera con las herramientas MCP de GitHub: `actions_run_trigger`
+  (`run_workflow`, `rerun_failed_jobs`, `cancel_workflow_run`), `actions_list`
+  (`list_workflow_runs`, `list_workflow_jobs`, `list_workflow_run_artifacts`) y `actions_get`
+  (`get_workflow_run`, `download_workflow_run_artifact`, `get_workflow_run_logs_url`). Para
+  renders largos programa revisiones periódicas en vez de esperar activamente.
 
 ---
 
-## c) Distribución del .blend
+## c) Transporte temporal del .blend
 
-El `.blend` **nunca** entra en Git ni en LFS (ver tabla de límites). Se distribuye como
-**asset de una GitHub Release**, que no tiene límite de ancho de banda y admite archivos de
-hasta 2 GiB.
+El `.blend` **nunca** entra en Git ni en LFS (ver tabla de límites). Viaja así:
 
-Procedimiento (una vez por versión del `.blend`):
-
-1. En Blender: *File → External Data → Pack Resources* (aunque el proyecto es procedural,
-   garantiza que no haya rutas externas) y guardar. Opcional: *Compress* al guardar para
-   reducir la descarga.
-2. Calcular el hash: `sha256sum Avion_Fase_3_Cabina.blend`.
-3. Crear la Release con el `.blend` como asset:
-   `gh release create blend-fase3-v1 Avion_Fase_3_Cabina.blend --title "Blend Fase 3 v1" --notes "SHA-256: <hash>"`
-4. Copiar URL y hash en `render_config.json` → `blend.url`, `blend.sha256`, `blend.release_tag`.
-   URL con el formato:
-   `https://github.com/<propietario>/<repo>/releases/download/<tag>/<archivo>`.
-
-En cada runner:
-
-```bash
-curl -fL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/escena.blend" "$BLEND_URL"
-echo "$BLEND_SHA256  $RUNNER_TEMP/escena.blend" | sha256sum -c -   # aborta si no coincide
 ```
+Nube de Claude ──curl──▶ temp.sh (3 días) ──transporte──▶ Release temporal ──▶ cada runner
+```
+
+1. **En la nube de Claude:** *File → External Data → Pack Resources*, guardar y calcular
+   `sha256sum Avion_Fase_3_Cabina.blend`.
+2. **Subida a temp.sh** (alternativa: Litterbox con `time=72h`):
+   `curl -fsS -F "file=@Avion_Fase_3_Cabina.blend" https://temp.sh/upload` → URL de origen.
+3. Escribir en `render_config.json` → `blend.origen_url`, `blend.sha256`, `blend.release_tag`
+   (`transporte-<fase>-v<n>`) y `blend.url`
+   (`https://github.com/<propietario>/<repo>/releases/download/<tag>/<archivo>`). Commit y push.
+4. **Trabajo `transporte`** (primer trabajo de `benchmark.yml`, `permissions: contents: write`):
+   si la Release `blend.release_tag` no existe, descarga `blend.origen_url`
+   (`curl -X POST` en temp.sh, `curl -L` en Litterbox), verifica el SHA-256 y crea la Release
+   como *pre-release* con el `.blend` como único asset y la nota
+   «Transporte temporal: se borra al terminar el render». Si existe, comprueba que el hash del
+   asset coincide. `benchmark.yml` admite `solo_transporte=true` para volver a crear la Release
+   sin repetir el benchmark (p. ej. para un `parche`).
+5. **En cada runner:** descarga desde la Release (sin límite de ancho de banda) y verificación:
+
+   ```bash
+   curl -fL --retry 5 --retry-delay 10 -o "$RUNNER_TEMP/escena.blend" "$BLEND_URL"
+   echo "$BLEND_SHA256  $RUNNER_TEMP/escena.blend" | sha256sum -c -   # aborta si no coincide
+   ```
+
+6. **Borrado:** al terminar el render (montaje validado en la última parte), `assemble` guarda
+   una copia en el artefacto `blend-final` (para la entrega) y ejecuta
+   `gh release delete <tag> --cleanup-tag --yes`. `limpieza` comprueba después que no queda
+   ninguna Release ni tag.
 
 Reglas:
 
-- **Inmutabilidad:** un asset publicado no se reemplaza ni se borra mientras haya un vídeo en
-  curso que lo use. Cualquier cambio en el `.blend` = Release nueva (`blend-fase3-v2`) +
-  hash nuevo + **vídeo nuevo desde cero** (cambia la huella de render).
-- El SHA-256 es la garantía de que los 20+ runners renderizan exactamente el mismo archivo.
-- El `.blend` publicado es **público**: cualquiera puede descargarlo.
+- ⚠️ **Mientras la Release existe, el `.blend` es público** y cualquiera puede descargarlo. Lo
+  mismo vale para el enlace de temp.sh durante sus 3 días. Antes de subirlo, revisar que no
+  contiene nada que no deba verse.
+- **Inmutabilidad durante un vídeo:** el asset no se reemplaza. Cualquier cambio en el `.blend`
+  = hash nuevo + Release nueva (`transporte-fase3-v2`) + **vídeo nuevo desde cero** (cambia la
+  huella de render).
+- El SHA-256 garantiza que todos los runners renderizan exactamente el mismo archivo.
 
 ---
 
@@ -222,25 +312,24 @@ Ejecución **headless** (siempre esta forma):
 
 Antes de **cada vídeo** (y cada vez que cambie cualquier cosa de la huella de render) se ejecuta
 `benchmark.yml` en un runner real con los **ajustes finales**. Nunca se usan tiempos medidos en
-otro sitio (el entorno de Claude: 2 núcleos, ~30 s/frame a 800×450 y 8 muestras, no es
-representativo).
+la nube de Claude (2 núcleos, ~30 s/frame a 800×450 y 8 muestras: no es representativo).
 
-1. Elegir **3–5 frames representativos**:
+1. Elegir **3–5 frames representativos** (la nube de Claude los conoce por la animación):
    - el **más simple** (p. ej. exterior con cielo y poco fondo);
    - el **más pesado** (p. ej. cabina con cristales, muchas luces, volumétricos, desenfoque de
      movimiento);
    - **uno intermedio**;
    - opcionalmente, 1–2 más donde haya dudas (cambios de plano, primeros planos).
-2. Guardarlos en `benchmark.frames` del `render_config.json` y lanzar
-   `gh workflow run benchmark.yml -f frames=1,1350,2700` (la entrada sobrescribe la config).
-3. `benchmark.yml` usa una matriz con **un frame por trabajo** (así el benchmark nunca roza las
-   6 h y termina antes) y un trabajo final `resumen`. Cada trabajo hace exactamente los mismos
-   pasos que un trozo de render (misma versión, mismo `.blend`, mismo script).
-4. Salida: artefacto `benchmark.json` y resumen en la página del run con, por frame,
-   `t_carga_s` (abrir el `.blend` y preparar la escena) y `t_render_s`; y en global:
+2. Guardarlos en `benchmark.frames` del `render_config.json` y lanzar `benchmark.yml` con
+   `frames=1,1350,2700` (la entrada sobrescribe la config).
+3. `benchmark.yml` ejecuta primero `transporte` ([c)](#c-transporte-temporal-del-blend)) y luego
+   una matriz con **un frame por trabajo** (así nunca roza las 6 h) y un trabajo `resumen`. Cada
+   trabajo hace exactamente los mismos pasos que un trozo de render.
+4. Salida: artefacto `benchmark` (`benchmark.json`, `retention-days: 1`) y resumen en la página
+   del run con, por frame, `t_carga_s` y `t_render_s`; y en global:
    - `s_por_frame_max` = máximo de `t_render_s` → **es el que se usa en la fórmula**;
    - `s_por_frame_medio` = media de `t_render_s` → para estimar horas;
-   - `frames_por_trozo` propuesto y la tabla trozos/oleadas/horas (lo calcula `plan_chunks.py`).
+   - `frames_por_trozo` propuesto, trozos, oleadas, partes y horas (lo calcula `plan_chunks.py`).
 5. Copiar `s_por_frame_max_benchmark`, `s_por_frame_medio_benchmark`, `fecha_benchmark` y
    `frames_por_trozo` a `render_config.json` y hacer commit. Rellenar la fila correspondiente de
    la [tabla de escenarios](#tabla-de-escenarios).
@@ -251,11 +340,11 @@ Notas:
   aprovechar `persistent_data`). Es una estimación **conservadora**, que es lo que queremos.
 - Si un solo frame tarda más de 16.200 ÷ 1,15 = 14.087 s (~3 h 55 min), la fórmula da
   `frames_por_trozo = 0`: **no se puede renderizar así**. Reducir muestras/resolución o
-  simplificar la escena y repetir el benchmark.
+  simplificar la escena en la nube de Claude y repetir el benchmark.
 
 ---
 
-## f) Cálculo de trozos
+## f) Cálculo de trozos y partes
 
 ### Fórmula
 
@@ -263,7 +352,8 @@ Notas:
 frames_por_trozo = floor( 16.200 s ÷ (s_por_frame_máx × 1,15) )
 trozos           = ceil( frames_totales ÷ frames_por_trozo )
 oleadas          = ceil( trozos ÷ 20 )
-horas_reales     ≈ oleadas × ~5 h            (cota superior)
+partes           = ceil( trozos ÷ 60 )          (60 trozos = 3 oleadas por ejecución)
+horas_reales     ≈ oleadas × ~5 h               (cota habitual; peor caso ~6 h por oleada)
 horas_runner     ≈ frames_totales × s_por_frame_medio ÷ 3.600
 ```
 
@@ -273,8 +363,10 @@ horas_runner     ≈ frames_totales × s_por_frame_medio ÷ 3.600
 - **1,15** = margen del 15 % para la variación entre runners (no todos tienen la misma CPU) y
   entre frames parecidos.
 - **~5 h por oleada** = 4 h 30 min de render planificado + ~30 min de preparación,
-  codificación y subida. Es una cota superior: si la mayoría de frames está por debajo del
-  máximo, cada oleada dura menos.
+  codificación y subida.
+- **Partes:** los artefactos duran 24 h. Con 3 oleadas por ejecución, la cota es 3 × 5 h = 15 h
+  (peor caso 3 × 6 h = 18 h), siempre dentro de la ventana. Si `partes > 1`, los trozos se
+  reparten de forma equilibrada entre las partes.
 
 ### Ejemplo resuelto (⚠️ cifras de EJEMPLO, no medidas)
 
@@ -289,8 +381,12 @@ Supuesto: `s_por_frame_máx = 300 s`; vídeo de **90 s a 30 fps**.
 | Frames totales | 90 × 30 | **2.700** |
 | Trozos | ceil(2.700 ÷ 46) = ceil(58,7) | **59** (58 de 46 frames + 1 de 2.700 − 58 × 46 = 32 frames) |
 | Oleadas | ceil(59 ÷ 20) = ceil(2,95) | **3** (20 + 20 + 19) |
-| Tiempo real | 3 × ~5 h | **~15 h** (cota superior) |
+| Partes | ceil(59 ÷ 60) | **1** (una sola ejecución) |
+| Tiempo real | 3 × ~5 h | **~15 h** (cota habitual; ≤ 18 h en el peor caso) |
 | Tiempo de runner consumido | 2.700 × 300 s = 810.000 s | 225 h (repartidas en 20 runners: 11,25 h ideales) |
+
+Segundo ejemplo (300 h de CPU, ver [b)](#b-arquitectura)): 67 trozos → ceil(67 ÷ 60) = **2 partes**
+de 34 y 33 trozos → 2 oleadas cada una (ceil(34 ÷ 20) = 2) → ~10 h por parte, ~20 h en total.
 
 ### Tabla de escenarios
 
@@ -298,15 +394,14 @@ Duración de referencia: **90 s**. Las columnas de rendimiento quedan **pendient
 la columna de píxeles es exacta y sirve solo como orientación (el coste de Cycles no escala
 exactamente con los píxeles).
 
-| Escenario | Resolución | fps | Frames | Píxeles vs 1080p | s/frame máx. | frames/trozo | Trozos | Oleadas | Horas reales (cota) |
-|---|---|---|---|---|---|---|---|---|---|
-| 1080p30 | 1920×1080 | 30 | 2.700 | 1,00× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente |
-| 1440p30 | 2560×1440 | 30 | 2.700 | 1,78× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente |
-| 2160p30 | 3840×2160 | 30 | 2.700 | 4,00× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente |
-| 2160p60 | 3840×2160 | 60 | 5.400 | 4,00× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente |
+| Escenario | Resolución | fps | Frames | Píxeles vs 1080p | s/frame máx. | frames/trozo | Trozos | Oleadas | Partes | Horas reales (cota) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1080p30 | 1920×1080 | 30 | 2.700 | 1,00× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 1440p30 | 2560×1440 | 30 | 2.700 | 1,78× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 2160p30 | 3840×2160 | 30 | 2.700 | 4,00× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente | pendiente |
+| 2160p60 | 3840×2160 | 60 | 5.400 | 4,00× | pendiente de benchmark | pendiente | pendiente | pendiente | pendiente | pendiente |
 
-Al rellenarla: anotar la fecha del benchmark y el run ID. Si `Trozos > 256`, indicar el número de
-tandas (`ceil(trozos ÷ 256)`).
+Al rellenarla: anotar la fecha del benchmark y el run ID.
 
 ### Presupuesto de disco por trozo (14 GB)
 
@@ -351,17 +446,18 @@ desenfoque de movimiento…) se toma del `.blend`, que es inmutable gracias al S
 ### Huella de render
 
 `render_chunk.py` y `plan_chunks.py` calculan la **huella de render**: SHA-256 del JSON canónico
-(claves ordenadas, sin espacios) formado por `blender`, `blend`, `escena`, `camara`, `frames`,
-`resolucion`, `fps`, `cycles`, `color` y `salida`. Se escribe en cada manifiesto.
+(claves ordenadas, sin espacios) formado por `blender`, `blend.sha256`, `escena`, `camara`,
+`frames`, `resolucion`, `fps`, `cycles`, `color` y `salida`. Se escribe en cada manifiesto.
 
-- `plan` (en `resume`/`assemble`) y `assemble` **rechazan** manifiestos con una huella distinta
-  de la actual. Así es imposible mezclar frames de ajustes o versiones distintas.
-- `troceo`, `benchmark`, `video` y `fotos` **no** forman parte de la huella (no alteran los
-  píxeles de los frames).
+- `plan` y `assemble` **rechazan** manifiestos con una huella distinta de la actual. Así es
+  imposible mezclar frames de ajustes o versiones distintas.
+- `blend.origen_url`, `blend.release_tag`, `blend.url`, `troceo`, `benchmark`, `video`, `fotos`,
+  `qc` y `entrega` **no** forman parte de la huella (no alteran los píxeles de los frames): por
+  ejemplo, se puede volver a transportar el mismo `.blend` con otro tag.
 
 ---
 
-## h) Seguridad ante el corte de 6 h
+## h) Seguridad ante el corte de 6 h y artefactos
 
 Tres capas, de la más suave a la más dura:
 
@@ -379,15 +475,31 @@ Pasos del trabajo de render tras el render, **todos con `if: always()`**:
 
 - **Codificar segmento(s)** con los frames válidos que haya (ver [j)](#j-montaje-final)).
 - **Subir artefactos** (`actions/upload-artifact`, `if: always()`), para que los frames hechos
-  se suban aunque el render se haya cortado:
+  se suban aunque el render se haya cortado.
 
-  | Artefacto | Contenido | Retención | Notas |
-  |---|---|---|---|
-  | `frames-c007-a1` | PNG del trozo | `retention-days: 7` | `compression-level: 0` (el PNG ya está comprimido). Solo para reanudar intentos y para re-codificar. |
-  | `manifest-c007-a1` | `manifest-c007.json` | 90 días (por defecto) | Fuente de verdad de qué frames están hechos. |
-  | `segmento-c007-a1` | `seg_000323-000368.mp4` (uno o varios) | 90 días | Entrada del montaje. |
+### Catálogo de artefactos
 
-  (`a1` = `github.run_attempt`; así un *Re-run failed jobs* no choca con nombres ya usados.)
+**Todos** llevan `retention-days: 1` y además se borran explícitamente: los intermedios al
+terminar el montaje ([j)](#j-montaje-final)) y el resto en la limpieza final ([n)](#n-limpieza-final)).
+
+| Artefacto | Contenido | Lo crea | Se borra |
+|---|---|---|---|
+| `benchmark` | `benchmark.json` | `benchmark.yml` | Al terminar el montaje |
+| `frames-c007-a1` | PNG del trozo (`compression-level: 0`, el PNG ya está comprimido) | `render` | Al terminar el montaje |
+| `manifest-c007-a1` | `manifest-c007.json` | `render` | Al terminar el montaje |
+| `segmento-c007-a1` | `seg_000323-000368.mp4` (uno o varios) | `render` | Al terminar el montaje |
+| `foto-l000-a1` | PNG de las fotos del lote | `render` (fotos) | Al terminar el montaje |
+| `relevo-<run_id>` | Segmentos, manifiestos, fotos y partes relevados de una ejecución previa | `plan` | Al terminar el montaje |
+| `parte-01` | Maestro intermedio de la parte (segmentos concatenados sin recodificar) + fronteras | `assemble` | Limpieza final |
+| `manifiesto-final` | `manifiesto_final.json` (huella, commit, runs, frames, fronteras de segmentos) | `assemble` | Limpieza final |
+| `video-final` | MP4 final | `assemble` (última parte) | Limpieza final |
+| `fotos-final` | `Fotos_Fase_3.zip` | `assemble` (última parte) | Limpieza final |
+| `blend-final` | Copia del `.blend` transportado | `assemble` (última parte) | Limpieza final |
+| `muestra-qc` | Muestra para el control de calidad ([l)](#l-control-de-calidad-en-la-nube-de-claude)) | `assemble` (última parte) | Limpieza final |
+
+(`a1` = `github.run_attempt`; así un *Re-run failed jobs* no choca con nombres ya usados.)
+Borrado explícito: `gh api -X DELETE repos/{owner}/{repo}/actions/artifacts/{id}` con
+`permissions: actions: write`.
 
 ### Manifiesto (`manifest-cNNN.json`)
 
@@ -417,18 +529,36 @@ Se reescribe de forma **atómica** (archivo temporal + `rename`) tras cada frame
 
 Un frame solo entra en `frames_completados` si el PNG se escribió a un archivo temporal, se
 renombró, se puede leer, tiene la resolución esperada y no es negro (ver
-[l)](#l-vigilancia-y-fallos)).
+[o)](#o-vigilancia-y-fallos)).
 
 ---
 
-## i) Reanudación
+## i) Reanudación y relevo
+
+### Ventana de 24 h
+
+Como todos los artefactos caducan al día, **toda reanudación debe lanzarse en menos de 24 h**
+desde la subida de los artefactos que reutiliza (objetivo práctico: < 20 h). Si se pasa, lo
+caducado se pierde y esos trozos se vuelven a renderizar.
+
+### Relevo
+
+El trabajo `plan` de cualquier ejecución con `runs_previos` (`resume`, `assemble`, `parche` y
+partes ≥ 2) descarga los artefactos útiles de esas ejecuciones
+(`actions/download-artifact` con `run-id` y `github-token`, `permissions: actions: read`) y los
+**vuelve a subir** a la ejecución actual como `relevo-<run_id>`. Efectos:
+
+- Los artefactos relevados ganan otras 24 h de vida.
+- `assemble` solo necesita leer la ejecución actual.
+- Antes de relevar, `plan` comprueba el espacio libre (`df`) y falla con un mensaje claro si la
+  suma de artefactos supera el 70 % del disco libre.
 
 ### Dentro de la misma ejecución: *Re-run failed jobs*
 
-Al re-ejecutar un trozo fallido, el trabajo:
+Al re-ejecutar un trozo fallido (en < 24 h), el trabajo:
 
 1. Descarga los artefactos `frames-cNNN-a*` y `manifest-cNNN-a*` de intentos anteriores de
-   **esta** ejecución (si existen y siguen retenidos).
+   **esta** ejecución.
 2. Lanza `render_chunk.py`, que **salta los frames que ya existen y validan** (comprobando su
    SHA-256 contra el manifiesto).
 3. Codifica el segmento del trozo completo y sube artefactos con el nuevo sufijo `a2`, `a3`…
@@ -438,25 +568,26 @@ pasar a `resume` con `frames_por_trozo` reducido.
 
 ### Ejecución nueva: modo `resume`
 
+Desde la nube de Claude (`actions_run_trigger` → `run_workflow`, `workflow_id: render.yml`) o
+con `gh`:
+
 ```bash
 gh workflow run render.yml -f modo=resume -f runs_previos=123456789
 # con trozos más pequeños tras un corte por tiempo (46 → 36, −20 % redondeando hacia abajo):
 gh workflow run render.yml -f modo=resume -f runs_previos=123456789 -f frames_por_trozo=36
 ```
 
-El trabajo `plan` (con `permissions: actions: read` y el `GITHUB_TOKEN`):
+El trabajo `plan`:
 
-1. Descarga **todos** los manifiestos `manifest-*` de las ejecuciones de `runs_previos`
-   (`actions/download-artifact` con `run-id` y `github-token`).
-2. Descarta (y avisa) los que tengan una huella de render distinta de la actual.
-3. Calcula `faltan = [frames.inicio … frames.fin] − ⋃ frames_completados`.
+1. Releva los artefactos de `runs_previos`.
+2. Descarta (y avisa) los manifiestos con una huella de render distinta de la actual.
+3. Calcula `faltan = [inicio … fin de la parte] − ⋃ frames_completados`.
 4. Reparte **solo** esos frames en trozos de `frames_por_trozo` (pueden ser rangos no
    contiguos dentro de un trozo) y emite la matriz. Si `faltan` está vacío, salta directamente
    al montaje.
 
-Los trabajos `render` de un `resume` funcionan igual que en `full`; además, el script salta
-cualquier frame que ya exista en su carpeta de salida. Para encadenar varios `resume`, se
-pasan **todas** las ejecuciones anteriores: `-f runs_previos=111,222,333`.
+Para encadenar varios `resume`, basta con pasar la ejecución anterior más reciente: ya contiene
+los relevos de las previas.
 
 ---
 
@@ -465,8 +596,8 @@ pasan **todas** las ejecuciones anteriores: `-f runs_previos=111,222,333`.
 ### Segmentos intermedios (en cada trozo)
 
 Cada trozo codifica, por cada **tramo contiguo** de frames válidos, un MP4 intermedio H.264 de
-muy alta calidad. Así el trabajo de montaje no tiene que descargar todos los PNG (no cabrían en
-los 14 GB del runner a 4K).
+muy alta calidad. Así el montaje no tiene que descargar todos los PNG (no cabrían en los 14 GB
+del runner a 4K).
 
 ```bash
 ffmpeg -framerate "$FPS" -start_number 323 -i "$FRAMES/frame_%06d.png" -frames:v 46 \
@@ -478,27 +609,31 @@ ffmpeg -framerate "$FPS" -start_number 323 -i "$FRAMES/frame_%06d.png" -frames:v
 - `yuv444p10le` (perfil High 4:4:4) evita submuestrear el croma dos veces y reduce el *banding*
   en degradados; si el `ffmpeg` del runner no lo soporta, `yuv444p`.
 - Nombre `seg_<inicio>-<fin>.mp4` con 6 dígitos: el orden alfabético es el orden temporal.
+- Cada segmento empieza en un fotograma clave: eso permite recortarlo después sin recodificar.
 
 ### Trabajo `assemble` (`needs: render`)
 
-1. Descarga todos los `manifest-*` y `segmento-*` de la ejecución actual y de `runs_previos`.
-2. **Cobertura:** comprueba que cada frame de `[inicio, fin]` está en exactamente un segmento
-   elegido. Si hay solapes, gana el segmento de la ejecución más reciente y, dentro de ella, el
-   del intento más alto; los segmentos contenidos en otro elegido se descartan. Un solape
-   parcial no resoluble o un hueco = **error** con la lista de frames y el comando de `resume`.
+1. Reúne manifiestos y segmentos de la ejecución actual (incluidos los relevados).
+2. **Cobertura:** comprueba que cada frame de la parte está en exactamente un segmento elegido.
+   Si hay solapes, gana el segmento de la ejecución más reciente y, dentro de ella, el del
+   intento más alto; los segmentos contenidos en otro elegido se descartan. Un solape parcial
+   no resoluble o un hueco = **error** con la lista de frames y el comando de `resume`.
 3. **Disco:** antes de empezar, `suma(segmentos) × 2 < espacio libre` (`df`); si no, error claro.
-4. **Concatenación en orden** y **una única codificación final**:
+4. **Maestro de la parte:** concatena los segmentos sin recodificar
+   (`ffmpeg -f concat -safe 0 -i lista.txt -c copy parte-01.mp4`) y guarda las fronteras de
+   segmento en `manifiesto_final.json`. Si no es la última parte: sube `parte-NN`, lanza la
+   parte siguiente y termina.
+5. **Última parte — codificación final única** de todos los maestros en orden:
 
    ```bash
-   # lista.txt:  file 'seg_000001-000046.mp4'  (una línea por segmento, en orden)
+   # lista.txt:  file 'parte-01.mp4'  (una línea por parte, en orden)
    ffmpeg -f concat -safe 0 -i lista.txt \
      -c:v libx264 -profile:v high -preset slow -crf 18 -pix_fmt yuv420p \
      -r "$FPS" -movflags +faststart -an "Video_Fase_3.mp4"
    ```
 
-   CRF final **≤ 18** (`video.crf_final`). Sin audio (si algún día se añade, se mezcla en este
-   paso).
-5. **Validación con `ffprobe`:**
+   CRF final **≤ 18** (`video.crf_final`). Sin audio (si algún día se añade, se mezcla aquí).
+6. **Validación con `ffprobe`:**
 
    ```bash
    ffprobe -v error -select_streams v:0 -count_frames \
@@ -513,36 +648,209 @@ ffmpeg -framerate "$FPS" -start_number 323 -i "$FRAMES/frame_%06d.png" -frames:v
    | `nb_read_frames` | `fin − inicio + 1` (2.700) |
    | `duration` | `frames ÷ fps` ± 1 frame (90,000 s ± 0,033 s) |
    | `pix_fmt` / `profile` | `yuv420p` / `High` |
-   | Tamaño del archivo | < 2 GiB (límite de asset de Release) |
+   | Tamaño del archivo | < 4 GB (límite de temp.sh); si se usará Litterbox, < 1 GB |
 
-6. **Publicación:** con `permissions: contents: write`, crea la Release `video.release_tag`
-   (`gh release create video-fase3-v1 Video_Fase_3.mp4 manifiesto_final.json …`).
-   `manifiesto_final.json` resume huella, commit, runs usados y frames. Si `publicar=false`, el
-   MP4 queda como artefacto `video-final` para revisión.
+7. **Fotos:** comprime las fotos en `Fotos_Fase_3.zip` (`zip -0`, el PNG ya está comprimido)
+   y comprueba que cada foto de `fotos[]` está dentro, con su resolución.
+8. **Muestra de QC** → artefacto `muestra-qc` ([l)](#l-control-de-calidad-en-la-nube-de-claude)).
+9. **Artefactos finales:** `video-final`, `fotos-final`, `blend-final` (copia del `.blend`
+   desde la Release) y `manifiesto-final`, todos con `retention-days: 1`.
+10. **Borrado de intermedios:** con todo validado, borra `frames-*`, `segmento-*`, `manifest-*`,
+    `foto-*`, `relevo-*` y `benchmark` de todas las ejecuciones implicadas. Se conservan solo
+    `parte-*` (para un posible parche) y los artefactos finales.
+11. **Borrado de la Release de transporte** (salvo `conservar_transporte=true`):
+    `gh release delete "$TAG" --cleanup-tag --yes`.
+12. Resumen en `$GITHUB_STEP_SUMMARY` con el resultado de `ffprobe` y el aviso de que el QC
+    está pendiente. **Aquí no se publica nada fuera de GitHub.**
+
+### Parche tras un QC rechazado (defectos en frames concretos)
+
+Si el QC encuentra frames defectuosos pero el `.blend` y los ajustes son correctos (p. ej. un
+frame corrupto que pasó la validación automática):
+
+1. `benchmark.yml` con `solo_transporte=true` (la Release ya se borró).
+2. `render.yml` con `modo=parche`, `rehacer_frames=…` y `runs_previos=<run del montaje>`.
+3. `assemble.sh --parche` recorta los maestros `parte-*` por las fronteras de segmento con
+   `-c copy` (cada segmento empieza en fotograma clave), sustituye los segmentos afectados,
+   repite la codificación final, la validación y la muestra de QC.
+
+Si el defecto es de cámara, animación, materiales o luz, **no hay parche**: se corrige en la nube
+de Claude, nuevo `.blend`, nueva huella y vídeo desde cero.
 
 ---
 
 ## k) Fotos fijas
 
-Mismo sistema, misma huella de versión, mismo script, con `render.yml` en `modo=fotos`:
+Mismo sistema, misma versión, mismo script:
 
 - La lista `fotos` del `render_config.json` define cada foto (`id`, `camara`, `frame`,
   `ancho`, `alto`, `muestras`). Por defecto **4K (3840×2160)** y **más muestras** que el vídeo.
   El resto de ajustes de [g)](#g-ajustes-de-render-comunes) se aplican igual.
-- **Un trabajo por foto** (matriz sobre `fotos`). Si las fotos son rápidas, se agrupan en
-  **lotes** con la misma fórmula: `fotos_por_trabajo = floor(16.200 ÷ (s_por_foto_máx × 1,15))`.
-- Benchmark: `benchmark.yml` con la entrada `tipo=fotos` renderiza las fotos más pesadas.
-  Si una sola foto supera 14.087 s (≈ 3 h 55 min), reducir muestras. (Partir una foto en
-  regiones con *border render* y coserlas queda como opción futura, no implementada.)
-- Salida: PNG RGB 16 bits, `<id>.png`, publicados como assets de la Release `fotos_release_tag`.
+- En `modo=full`, las fotos van como elementos `tipo: "fotos"` en la matriz de la **última
+  parte**, para que sus artefactos no caduquen antes del montaje. `modo=fotos` es solo para
+  procesos sin vídeo.
+- **Un trabajo por foto**; si son rápidas, en **lotes** con la misma fórmula:
+  `fotos_por_trabajo = floor(16.200 ÷ (s_por_foto_máx × 1,15))`.
+- Benchmark: `benchmark.yml` con `tipo=fotos` renderiza las fotos más pesadas. Si una sola foto
+  supera 14.087 s (≈ 3 h 55 min), reducir muestras. (Partir una foto en regiones con
+  *border render* y coserlas queda como opción futura, no implementada.)
+- Salida: PNG RGB 16 bits, `<id>.png` → artefacto intermedio `foto-lNNN-aK` → ZIP final
+  `entrega.nombre_zip_fotos` en `fotos-final`.
 
 ---
 
-## l) Vigilancia y fallos
+## l) Control de calidad en la nube de Claude
+
+**Ningún enlace se entrega sin QC aprobado.** `entrega.yml` solo se lanza después de que la
+nube de Claude haya revisado la muestra.
+
+### Contenido de `muestra-qc` (lo genera `assemble`)
+
+| Elemento | Detalle |
+|---|---|
+| Frames PNG originales | Primero, último, frames de `benchmark.frames`, y en hasta `qc.fronteras_max` fronteras entre trozos el último frame de un trozo y el primero del siguiente. Total ≤ `qc.frames_muestra_max`. |
+| Mismos frames extraídos del MP4 final | `mp4_frame_000123.png`, para medir la pérdida de la codificación. |
+| Fotos | Todas si son ≤ `qc.fotos_muestra_max`; si no, las más pesadas del benchmark + una selección aleatoria con semilla fija. |
+| `hoja_contactos.jpg` | Una miniatura por segundo del MP4 final (`ffmpeg … -vf "fps=1,scale=320:-1,tile=10x…"`). |
+| `ffprobe.json`, `manifiesto_final.json` | Metadatos para cruzar con la config. |
+
+### Procedimiento
+
+1. **Descargar** (nube de Claude, herramientas MCP de GitHub): `actions_list` →
+   `list_workflow_run_artifacts` del run del montaje → id de `muestra-qc` → `actions_get` →
+   `download_workflow_run_artifact` → URL temporal → `curl -L -o muestra.zip` en el directorio
+   temporal de la sesión → `unzip`. Si la red del entorno no permite el dominio de descarga,
+   se añade a la lista permitida del entorno.
+2. **Comprobaciones automáticas** con `python3 scripts/qc_muestra.py muestra/ --config render_config.json`:
+
+   | Comprobación | Criterio de rechazo |
+   |---|---|
+   | Resolución y profundidad de los PNG | Distinta de la config o de 16 bits |
+   | Frame o foto negra / en blanco | Luminancia media < `qc.luminancia_negro` (0,002) o > 0,998 |
+   | Píxeles inválidos (NaN, *fireflies* masivos) | > 0,1 % de píxeles saturados aislados |
+   | Fidelidad de la codificación | PSNR entre PNG y `mp4_frame` < `qc.psnr_min_db` (38 dB) |
+   | Saltos en fronteras de trozo | Diferencia entre los dos frames de una frontera > 3 × la mediana de diferencias entre frames consecutivos de la muestra |
+   | Metadatos | `ffprobe.json` no cuadra con resolución, fps, número de frames o duración |
+
+3. **Revisión visual** (la nube de Claude abre las imágenes): encuadre y cámara correctos,
+   geometría sin huecos ni intersecciones, materiales y cristales, luz y exposición coherentes
+   entre planos, ruido residual o manchas del denoise, continuidad en la hoja de contactos.
+4. **Veredicto:**
+   - **APROBADO** → lanzar `entrega.yml` con `run_montaje`, `qc_aprobado=true` y
+     `qc_resumen` (2–4 líneas con lo revisado).
+   - **RECHAZADO** → no se entrega nada. Defecto en frames concretos → parche ([j)](#j-montaje-final));
+     defecto de escena → corrección en la nube de Claude y vídeo nuevo. Si no se va a seguir
+     en < 24 h, lanzar `entrega.yml` con `solo_limpieza=true`.
+5. El QC debe completarse dentro de las 24 h de vida de los artefactos finales.
+
+---
+
+## m) Entrega por servicio de descarga externo
+
+`entrega.yml` (`workflow_dispatch`), lanzado por la nube de Claude tras el QC:
+
+| Entrada | Valores | Uso |
+|---|---|---|
+| `run_montaje` | ID de ejecución | Run cuyo `assemble` generó los artefactos finales. |
+| `qc_aprobado` | `true` · `false` | Si no es `true`, el trabajo `entrega` falla sin subir nada. |
+| `qc_resumen` | texto | Se copia a `entrega.json`. |
+| `servicio` | `temp.sh` (por defecto) · `litterbox` | Servicio de descarga. |
+| `solo_limpieza` | `true` · `false` (por defecto `false`) | Aborta el proceso: salta la entrega y limpia. |
+
+### Trabajo `entrega` (`permissions: actions: read`)
+
+1. Descarga `video-final`, `fotos-final`, `blend-final` y `manifiesto-final` del `run_montaje`.
+2. Comprueba tamaños contra el servicio (temp.sh < 4 GB; Litterbox < 1 GB). Si el servicio
+   elegido no admite un archivo, falla indicando el otro.
+3. `scripts/entrega.sh` sube **tres archivos**: el MP4 final, el ZIP de fotos y el `.blend`
+   final, con 3 intentos y espera creciente:
+
+   ```bash
+   # temp.sh
+   URL=$(curl -fsS --retry 3 -F "file=@Video_Fase_3.mp4" https://temp.sh/upload)
+   # Litterbox (alternativa)
+   URL=$(curl -fsS --retry 3 -F reqtype=fileupload -F time=72h \
+         -F "fileToUpload=@Video_Fase_3.mp4" https://litterbox.catbox.moe/resources/internals/api.php)
+   ```
+
+4. **Verificación de cada subida:** vuelve a descargar el archivo (`curl -X POST` en temp.sh,
+   `curl -L` en Litterbox) y compara el SHA-256. Si no coincide, repite la subida.
+5. Genera `entrega.json`, lo sube también al servicio (para que sea **descargable**) y lo
+   escribe en `$GITHUB_STEP_SUMMARY` junto con una tabla de enlaces:
+
+   ```json
+   {
+     "proyecto": "AX620",
+     "titulo": "Vídeo Fase 3",
+     "generado": "2026-10-03T09:12:00Z",
+     "servicio": "temp.sh",
+     "caduca": "2026-10-06T09:12:00Z",
+     "archivos": [
+       { "nombre": "Video_Fase_3.mp4", "bytes": 0, "sha256": "<sha256>", "url": "https://temp.sh/XXXXX/Video_Fase_3.mp4",
+         "descarga_cli": "curl -X POST -o Video_Fase_3.mp4 https://temp.sh/XXXXX/Video_Fase_3.mp4" },
+       { "nombre": "Fotos_Fase_3.zip", "bytes": 0, "sha256": "<sha256>", "url": "…", "descarga_cli": "…" },
+       { "nombre": "Avion_Fase_3_Cabina.blend", "bytes": 0, "sha256": "<sha256>", "url": "…", "descarga_cli": "…" }
+     ],
+     "qc": { "aprobado": true, "revisado_por": "nube de Claude", "resumen": "…" },
+     "huella_render": "<sha256>",
+     "commit": "<sha>",
+     "runs": [123456789],
+     "entrega_json_url": "https://temp.sh/YYYYY/entrega.json"
+   }
+   ```
+
+   (Los `0` y `…` del ejemplo son marcadores; los valores reales los escribe el script.)
+
+### Credenciales
+
+temp.sh y Litterbox **no necesitan credenciales**. Si en el futuro un servicio las exige
+(p. ej. una clave de API), se guardan en **GitHub Secrets** (*Settings → Secrets and variables →
+Actions*) y se leen como `${{ secrets.NOMBRE }}` solo en el paso que las usa. **Nunca** en el
+repositorio, en `render_config.json`, en logs ni en `entrega.json`.
+
+### Visibilidad de los enlaces
+
+El resumen de una ejecución de un repo público es **público**: los enlaces quedan visibles
+para cualquiera durante sus 3 días de vida. Se acepta porque el `.blend` ya fue público durante
+el transporte; si algún día no se acepta, se escriben solo en `entrega.json` y se reparten por
+otro canal.
+
+### Tras la entrega (nube de Claude)
+
+Descarga `entrega.json`, comprueba que cada enlace responde y que el SHA-256 de al menos el
+archivo más pequeño coincide, y **solo entonces** entrega al usuario los enlaces con su fecha de
+caducidad (3 días en temp.sh, 72 h en Litterbox).
+
+---
+
+## n) Limpieza final
+
+Trabajo `limpieza` de `entrega.yml` (`needs: entrega`, solo si la entrega tuvo éxito o si
+`solo_limpieza=true`; `permissions: actions: write, contents: write`), con
+`scripts/limpieza.sh`:
+
+1. Borra **todas** las Releases y sus tags: `gh release list` → `gh release delete <tag> --cleanup-tag --yes`;
+   tags sueltos con `git push --delete origin <tag>`.
+2. Borra **todos** los artefactos del repositorio:
+   `gh api repos/{owner}/{repo}/actions/artifacts --paginate` → `DELETE …/actions/artifacts/{id}`.
+3. Borra **todas** las cachés de Actions: `gh cache delete --all`.
+4. Comprueba que el árbol de Git no tiene binarios: `git ls-files` sin `.blend`, `.png`, `.exr`,
+   `.mp4`, `.zip` y sin archivos de más de 1 MB.
+5. **Verificación:** vuelve a listar Releases, tags, artefactos y cachés; si alguno no es 0,
+   falla. Escribe en el resumen «Repositorio limpio ✔» con los recuentos.
+
+Los logs de las ejecuciones se conservan (texto, sin secretos; caducan a los 90 días). Si la
+entrega falla, `limpieza` no se ejecuta: los artefactos finales siguen disponibles hasta 24 h
+para reintentar.
+
+---
+
+## o) Vigilancia y fallos
 
 ### Vigilancia
 
-- `gh run list --workflow render.yml` y `gh run watch <run_id>`; o la pestaña **Actions**.
+- Nube de Claude: `actions_list` → `list_workflow_runs` / `list_workflow_jobs` y revisiones
+  programadas. Usuario: pestaña **Actions** o `gh run watch <run_id>`.
 - Cada trabajo escribe en `$GITHUB_STEP_SUMMARY`: frames planificados/hechos, s/frame real
   (máx./media) frente al benchmark, CPU del runner y espacio libre.
 - **Alerta temprana:** si un trozo mide un `s/frame` real > 1,15 × `s_por_frame_max_benchmark`,
@@ -564,36 +872,41 @@ Mismo sistema, misma huella de versión, mismo script, con `render.yml` en `modo
 | Trabajo cancelado a las 6 h | Trozo demasiado grande | Lanzar el modo `resume` y reducir `frames_por_trozo` un 20 % |
 | Paso de render cortado a los 330 min (manifiesto `parcial`) | s/frame real mayor que el benchmark (frame pesado no incluido, runner más lento) | `resume` con `frames_por_trozo` −20 %; añadir ese frame al próximo benchmark |
 | Muchos trozos `parcial` por parada suave | `s_por_frame_max` infravalorado | Cancelar, repetir benchmark con frames más pesados, `resume` con el nuevo valor |
-| `No space left on device` | PNG acumulados (4K), tarball sin borrar, segmentos grandes | Comprobar regla de disco de [f)](#presupuesto-de-disco-por-trozo-14-gb); borrar tarball tras extraer; reducir `frames_por_trozo` |
-| `sha256sum: WARNING: computed checksum did NOT match` (`.blend`) | Asset reemplazado, URL de otra Release, descarga truncada | Corregir URL/hash. Nunca reemplazar un asset: Release nueva y vídeo nuevo |
-| `curl: (22) … 404` o timeout al descargar | Release borrada, tag mal escrito, blender.org caído | Revisar `blend.url`; los `--retry 5` cubren cortes breves; re-ejecutar el trabajo |
+| `No space left on device` | PNG acumulados (4K), tarball sin borrar, relevo grande | Comprobar regla de disco de [f)](#presupuesto-de-disco-por-trozo-14-gb); borrar tarball tras extraer; reducir `frames_por_trozo` |
+| `transporte`: descarga de `origen_url` falla | Enlace de temp.sh caducado (3 días) o mal copiado | Volver a subir el `.blend` desde la nube de Claude y actualizar `blend.origen_url` |
+| `sha256sum: WARNING: computed checksum did NOT match` (`.blend`) | Asset distinto, URL de otra Release, descarga truncada | Corregir URL/hash. Nunca reemplazar un asset: Release nueva y vídeo nuevo |
+| `curl: (22) … 404` al descargar de la Release | Release ya borrada (montaje terminado) o tag mal escrito | `benchmark.yml` con `solo_transporte=true`; revisar `blend.url` |
 | Blender termina con `Segmentation fault` o el runner muere | Falta de RAM (16 GB), escena muy pesada | Revisar `free -g` en el log; si es OOM, cambiar ajustes = **vídeo nuevo** (cambia la huella) |
 | Blender no arranca: `error while loading shared libraries` | Falta una librería del sistema | Añadir el paquete a la lista de `apt-get` de [d)](#d-instalación-y-ejecución-de-blender-en-el-runner) |
 | Frame negro | Cámara o escena equivocada, luces en otra view layer, colección oculta en render | Revisar `escena`/`camara` en la config; probar ese frame en el benchmark |
 | PNG corrupto o truncado | Corte durante la escritura | La escritura atómica lo descarta; se re-renderiza en el reintento o `resume` |
 | Parpadeo de ruido entre frames | Semilla animada o ajustes distintos entre trozos | Comprobar `semilla_animada: false` y que todos los manifiestos tienen la misma huella |
 | Saltos de color o brillo entre segmentos | Gestión de color distinta | Imposible con huella única; si aparece, revisar que el script impone `color.*` |
-| Montaje: "faltan frames" | Trozos incompletos o fallidos | `modo=resume` con todos los `runs_previos` |
+| Montaje: "faltan frames" | Trozos incompletos o fallidos | `modo=resume` con `runs_previos` en < 24 h |
+| `plan`: "artefacto caducado" en el relevo | Han pasado más de 24 h | Esos frames se re-renderizan; lanzar antes la próxima vez |
 | `ffprobe`: `nb_read_frames` no cuadra | Segmento duplicado o solapado en `lista.txt` | Revisar la selección de segmentos del montaje |
+| QC rechazado | Defecto en frames concretos o en la escena | [l)](#l-control-de-calidad-en-la-nube-de-claude): parche o vídeo nuevo |
+| `entrega`: subida falla o SHA-256 distinto tras 3 intentos | temp.sh caído o saturado | Re-ejecutar `entrega.yml` con `servicio=litterbox` (si los archivos < 1 GB) |
+| `entrega`: archivo > 1 GB con Litterbox | Límite del servicio | Usar temp.sh |
+| `limpieza` falla: quedan Releases/artefactos | Permisos del token o borrado concurrente | Re-ejecutar `entrega.yml` con `solo_limpieza=true` |
 | Trabajos en cola mucho tiempo | Otros workflows de la cuenta ocupan los 20 huecos | Esperar o cancelar los otros; un vídeo a la vez |
 | "Re-run" no disponible | Agotadas las 50 re-ejecuciones | `modo=resume` en una ejecución nueva |
-| Artefactos `frames-*` desaparecidos | Retención de 7 días vencida | No afecta a `resume`/`assemble` (usan manifiestos y segmentos, 90 días) |
 
 ---
 
-## m) Riesgos y normas
+## p) Riesgos y normas
 
 ### Visibilidad pública
 
-- El código, la configuración, los logs, los artefactos (frames, segmentos) y las Releases
-  (`.blend`, vídeos, fotos) son **públicos**. Cualquiera puede descargar el `.blend`.
-- Antes de publicar, revisar que el `.blend` no contiene nada que no deba verse (textos
-  internos, rutas locales con nombre de usuario, objetos ocultos).
-- Elegir una licencia (`LICENSE`) que refleje lo que se permite hacer con el modelo y los vídeos.
-- Ningún dato personal, token ni secreto en el repositorio. El `GITHUB_TOKEN` es automático y
-  se usa con permisos mínimos.
+- El código, la configuración, los logs y resúmenes de ejecución, los artefactos mientras
+  existen, la Release de transporte (con el `.blend`) y los enlaces de entrega son **públicos**.
+- Antes de subir el `.blend`, revisar que no contiene nada que no deba verse (textos internos,
+  rutas locales con nombre de usuario, objetos ocultos).
+- Elegir una licencia (`LICENSE`) que refleje lo que se permite hacer con el código.
+- Ningún dato personal, token ni secreto en el repositorio. Credenciales, si algún día hacen
+  falta, solo en GitHub Secrets.
 
-### Uso razonable de Actions
+### Uso razonable de Actions y de los servicios externos
 
 Las condiciones de GitHub prohíben usar los runners para actividades **no relacionadas** con el
 proyecto del repositorio y cualquier uso que suponga una carga desproporcionada. Renderizar los
@@ -602,9 +915,10 @@ vídeos de **este** proyecto de forma puntual es una zona gris aceptable si no s
 - Un vídeo a la vez; nada de render continuo ni de trabajos para terceros.
 - Benchmark primero: no lanzar cientos de horas a ciegas.
 - Cancelar ejecuciones que se sepa que no sirven (ajustes erróneos, `.blend` equivocado).
-- PNG con retención de 7 días; borrar artefactos y Releases obsoletos.
-- No crear repositorios ni cuentas adicionales para esquivar límites (además de inútil para la
-  concurrencia, viola las condiciones).
+- Retención de 1 día, borrado activo de artefactos, Releases y cachés.
+- No crear repositorios ni cuentas adicionales para esquivar límites.
+- temp.sh y Litterbox son servicios gratuitos de terceros: solo los archivos de la entrega, sin
+  usos comerciales (Litterbox lo prohíbe sin permiso) y respetando su contenido prohibido.
 
 ### Si GitHub limita la cuenta
 
@@ -616,27 +930,33 @@ repositorio o suspender la cuenta.
    (render puntual de los vídeos del propio proyecto).
 3. **No** intentar esquivarlo con otros repositorios o cuentas.
 4. Plan B: renderizar con el mismo `render_chunk.py` y `render_config.json` en otra máquina
-   (local o nube de pago). Los manifiestos y segmentos ya hechos siguen siendo válidos si la
-   huella coincide.
+   (local o nube de pago).
+
+### Si un servicio de descarga deja de funcionar
+
+Cambiar `entrega.servicio` a la alternativa. Si ambos fallan, buscar otro servicio sin cuenta y
+con API, verificar su tamaño máximo y conservación, documentarlo en [a)](#servicios-de-descarga-externos)
+con fecha y adaptar `scripts/entrega.sh`.
 
 ---
 
-## n) Checklist previa al lanzamiento
+## q) Checklist previa al lanzamiento
 
-- [ ] El repositorio es **público** y no contiene `.blend`, secretos ni datos personales.
-- [ ] El `.blend` tiene los recursos empaquetados y está publicado en una Release `blend-<fase>-v<n>`.
-- [ ] `blend.url` descarga el archivo y `sha256sum` coincide con `blend.sha256`.
+- [ ] El repositorio es **público** y no contiene `.blend`, binarios, secretos ni datos personales.
+- [ ] No quedan Releases, artefactos ni cachés de un proceso anterior (si quedan: `entrega.yml` con `solo_limpieza=true`).
+- [ ] El `.blend` tiene los recursos empaquetados, se ha revisado que puede ser público y está subido a temp.sh desde la nube de Claude.
+- [ ] `blend.origen_url`, `blend.sha256`, `blend.release_tag` y `blend.url` están en `render_config.json`.
 - [ ] `blender.version`, `blender.url` y `blender.sha256` corresponden al tarball oficial y a la versión con la que se hizo el `.blend` (misma serie, p. ej. 5.2.x).
 - [ ] `escena` y `camara` existen en el `.blend` con esos nombres exactos.
 - [ ] `frames.inicio`/`frames.fin` y `fps` dan la duración deseada (frames = duración × fps).
 - [ ] Resolución, muestras, umbral adaptativo, denoise, semilla estática y gestión de color son los **definitivos**.
 - [ ] Benchmark ejecutado con esos ajustes en un runner real, con el frame más simple, el más pesado y uno intermedio; `s_por_frame_max_benchmark` y `fecha_benchmark` anotados.
 - [ ] `frames_por_trozo` calculado con la fórmula y comprobado a mano; cumple la regla de disco.
-- [ ] Trozos ≤ 256 (si no, tandas planificadas) y horas estimadas aceptables.
-- [ ] `video.nombre_salida` en ASCII sin espacios y `video.release_tag` sin usar.
+- [ ] Partes calculadas (≤ 60 trozos por parte) y horas estimadas aceptables.
+- [ ] La nube de Claude tiene programadas revisiones para vigilar el render, lanzar `resume` en < 24 h y hacer el QC en < 24 h tras el montaje.
+- [ ] `entrega.servicio` admite el tamaño previsto del MP4 (temp.sh < 4 GB; Litterbox < 1 GB).
 - [ ] No hay otros workflows de la cuenta ocupando la concurrencia.
 - [ ] `render_config.json` final está en un commit de la rama desde la que se lanza.
-- [ ] Se ha leído esta checklist con alguien (o con Claude) antes de lanzar el `full`.
 
 ---
 
@@ -647,12 +967,13 @@ y se ignoran. **H** = forma parte de la huella de render (no se cambia a mitad d
 
 | Campo | Tipo | H | Descripción |
 |---|---|---|---|
-| `version_config` | entero | — | Versión del esquema (1). |
+| `version_config` | entero | — | Versión del esquema (2). |
 | `blender.version` | texto | H | Versión exacta, p. ej. `5.2.2`. |
 | `blender.url` | URL | H | Tarball oficial Linux x64. |
 | `blender.sha256` | hex 64 | H | Hash oficial del tarball. |
-| `blend.release_tag` | texto | H | Tag de la Release que contiene el `.blend`. |
-| `blend.url` | URL | H | URL de descarga del asset. |
+| `blend.origen_url` | URL | — | Enlace temporal (temp.sh o Litterbox) desde el que `transporte` crea la Release. |
+| `blend.release_tag` | texto | — | Tag de la Release temporal de transporte (`transporte-<fase>-v<n>`). |
+| `blend.url` | URL | — | URL de descarga del asset en la Release. |
 | `blend.sha256` | hex 64 | H | Hash del `.blend`. |
 | `escena` | texto | H | Nombre de la escena. |
 | `camara` | texto | H | Nombre del objeto cámara. |
@@ -678,31 +999,42 @@ y se ignoran. **H** = forma parte de la huella de render (no se cambia a mitad d
 | `troceo.fecha_benchmark` | fecha ISO | — | Cuándo se midió. |
 | `troceo.frames_por_trozo` | entero | — | Resultado de la fórmula; puede cambiar entre ejecuciones. |
 | `troceo.max_paralelo` | entero | — | 20. |
+| `troceo.trozos_max_por_parte` | entero | — | 60 (3 oleadas). |
 | `troceo.parada_suave_s` | entero | — | 18000 (5 h). |
 | `benchmark.frames` | lista | — | 3–5 frames representativos. |
 | `video.nombre_salida` | texto | — | MP4 final, ASCII sin espacios. |
-| `video.titulo` | texto | — | Título visible en la Release. |
-| `video.release_tag` | texto | — | Release donde se publica. |
+| `video.titulo` | texto | — | Título visible en `entrega.json`. |
 | `video.crf_intermedio` | entero | — | 10–12. |
 | `video.pix_fmt_intermedio` | texto | — | `yuv444p10le`. |
 | `video.crf_final` | entero | — | ≤ 18. |
 | `video.preset_final`, `.pix_fmt_final`, `.perfil_final` | texto | — | `slow`, `yuv420p`, `high`. |
 | `fotos[]` | lista | — | `id`, `camara`, `frame`, `ancho`, `alto`, `muestras`. |
-| `fotos_release_tag` | texto | — | Release de las fotos. |
+| `qc.frames_muestra_max` | entero | — | Máximo de frames en `muestra-qc` (24). |
+| `qc.fronteras_max` | entero | — | Fronteras entre trozos muestreadas (8). |
+| `qc.fotos_muestra_max` | entero | — | Máximo de fotos en la muestra (10). |
+| `qc.psnr_min_db` | número | — | 38. |
+| `qc.luminancia_negro` | número | — | 0.002. |
+| `entrega.servicio` | `temp.sh` · `litterbox` | — | Servicio de descarga. |
+| `entrega.alternativa` | texto | — | Servicio de reserva. |
+| `entrega.litterbox_tiempo` | `72h` | — | Conservación en Litterbox. |
+| `entrega.nombre_zip_fotos` | texto | — | Nombre del ZIP de fotos. |
+| `entrega.nombre_blend` | texto | — | Nombre del `.blend` entregado. |
 
 ---
 
 ## Contratos entre componentes
 
-Para que la implementación encaje sin ambigüedades:
-
-| Componente | Entrada | Salida |
-|---|---|---|
-| `scripts/plan_chunks.py` | `--config render_config.json`; opcional `--benchmark benchmark.json`, `--manifiestos <dir>`, `--frames-por-trozo N`, `--tanda K` | JSON por stdout: `{"frames_por_trozo": N, "trozos": [{"indice", "nombre", "rangos"}], "total_trozos", "oleadas", "horas_estimadas"}`; código ≠ 0 si la fórmula da 0 o la huella no coincide. |
-| `scripts/render_chunk.py` | Ejecutado por Blender; tras `--`: `--config`, `--trozo`, `--rangos 1-46[,60-70]`, `--salida <dir>`, `--manifiesto <ruta>`; opcional `--benchmark`, `--foto <id>` | PNG validados en `<dir>`, manifiesto actualizado frame a frame. Código 0 si `completo` o `parcial` por parada suave; ≠ 0 si hay frames fallidos. |
-| `scripts/assemble.sh` | `--config render_config.json --segmentos <dir> --manifiestos <dir> --salida <mp4>` | MP4 final + `manifiesto_final.json`; código ≠ 0 si falta cobertura o falla `ffprobe`. |
-| `.github/workflows/benchmark.yml` | `workflow_dispatch`: `frames`, `tipo` (`video`/`fotos`) | Artefacto `benchmark.json` + resumen. |
-| `.github/workflows/render.yml` | `workflow_dispatch`: `modo`, `runs_previos`, `tanda`, `frames_por_trozo`, `publicar` | Artefactos por trozo, `video-final` y Release. |
+| Componente | Dónde corre | Entrada | Salida |
+|---|---|---|---|
+| `scripts/plan_chunks.py` | Runner (`plan`, `resumen`) | `--config render_config.json`; opcional `--benchmark benchmark.json`, `--manifiestos <dir>`, `--frames-por-trozo N`, `--parte K`, `--rehacer <rangos>` | JSON por stdout: `{"frames_por_trozo", "parte", "partes", "trozos": [{"tipo", "indice", "nombre", "rangos" \| "fotos"}], "oleadas", "horas_estimadas"}`; código ≠ 0 si la fórmula da 0 o la huella no coincide. |
+| `scripts/render_chunk.py` | Runner, dentro de Blender | Tras `--`: `--config`, `--trozo`, `--rangos 1-46[,60-70]` o `--fotos <ids>`, `--salida <dir>`, `--manifiesto <ruta>`; opcional `--benchmark` | PNG validados en `<dir>`, manifiesto actualizado frame a frame. Código 0 si `completo` o `parcial` por parada suave; ≠ 0 si hay frames fallidos. |
+| `scripts/assemble.sh` | Runner (`assemble`) | `--config render_config.json --segmentos <dir> --manifiestos <dir> --parte K [--ultima] [--parche <rangos>]` | `parte-K.mp4`; en la última parte, MP4 final, ZIP de fotos, `manifiesto_final.json` y `muestra-qc/`; código ≠ 0 si falta cobertura o falla `ffprobe`. |
+| `scripts/entrega.sh` | Runner (`entrega`) | `--config render_config.json --servicio temp.sh\|litterbox --archivos <dir> --qc-resumen <texto>` | Archivos subidos y verificados, `entrega.json` subido y escrito en el resumen. |
+| `scripts/limpieza.sh` | Runner (`limpieza`) | `GITHUB_TOKEN`, `GITHUB_REPOSITORY` | 0 Releases, 0 tags, 0 artefactos, 0 cachés; código ≠ 0 si queda algo. |
+| `scripts/qc_muestra.py` | **Nube de Claude** | `muestra/ --config render_config.json` | Informe con los criterios de [l)](#l-control-de-calidad-en-la-nube-de-claude) y veredicto automático; la revisión visual la completa Claude. |
+| `.github/workflows/benchmark.yml` | GitHub Actions | `workflow_dispatch`: `frames`, `tipo` (`video`/`fotos`), `solo_transporte` | Release de transporte + artefacto `benchmark` + resumen. |
+| `.github/workflows/render.yml` | GitHub Actions | `workflow_dispatch`: `modo`, `parte`, `runs_previos`, `frames_por_trozo`, `rehacer_frames`, `conservar_transporte` | Artefactos de [h)](#catálogo-de-artefactos); Release de transporte borrada al final. |
+| `.github/workflows/entrega.yml` | GitHub Actions | `workflow_dispatch`: `run_montaje`, `qc_aprobado`, `qc_resumen`, `servicio`, `solo_limpieza` | Enlaces en el resumen y en `entrega.json`; repositorio limpio. |
 
 Orden de pasos de cada trabajo de `render`:
 
@@ -713,6 +1045,6 @@ flowchart LR
     S3 --> S4["Recuperar intentos<br/>previos si los hay"]
     S4 --> S5["Render<br/>timeout 330 min"]
     S5 --> S6["Segmentos MP4<br/>if always"]
-    S6 --> S7["Subir artefactos<br/>if always"]
+    S6 --> S7["Subir artefactos<br/>retention 1 día, if always"]
     S7 --> S8["Resumen<br/>STEP_SUMMARY"]
 ```

@@ -13,6 +13,9 @@ segmentos/
 benchmark.json
 manifest-*.json
 manifiesto_final.json
+entrega.json
+muestra-qc/
+*.zip
 
 # Blender descargado en local para pruebas
 blender-*-linux-x64/

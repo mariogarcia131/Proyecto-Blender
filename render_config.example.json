@@ -1,6 +1,6 @@
 {
-  "_leeme": "Plantilla de configuración de render. Copiar a render_config.json (raíz del repositorio) y rellenar los valores PENDIENTE. Las claves que empiezan por '_' son comentarios y los scripts las ignoran. Referencia completa de campos: docs/ESTRATEGIA_RENDER.md, sección 'Referencia de render_config.json'.",
-  "version_config": 1,
+  "_leeme": "Plantilla de configuración de render. Copiar a render_config.json (raíz del repositorio) y rellenar los valores PENDIENTE. Las claves que empiezan por '_' son comentarios y los scripts las ignoran. Referencia completa de campos: docs/ESTRATEGIA_RENDER.md, sección 'Referencia de render_config.json'. Sin credenciales: si algún día hacen falta, van en GitHub Secrets.",
+  "version_config": 2,
 
   "_blender": "Versión EXACTA de Blender para todo el vídeo. Tarball oficial de Linux x64 y su SHA-256 publicado en download.blender.org (verificado el 2026-10-02). Forma parte de la huella de render: no se cambia a mitad de un vídeo.",
   "blender": {
@@ -9,10 +9,11 @@
     "sha256": "84098912789dc450e95697c4184fb8a90acbe5111c2ba4aede3fecb57806a168"
   },
 
-  "_blend": "El .blend NUNCA va en Git ni en LFS. Se sube como asset de una Release y aquí se fija su URL de descarga y su SHA-256 (sha256sum Avion_Fase_3_Cabina.blend).",
+  "_blend": "El .blend NUNCA va en Git ni en LFS. La nube de Claude lo sube a temp.sh (origen_url); el trabajo 'transporte' de benchmark.yml lo copia a una Release TEMPORAL (pública mientras existe) que render.yml borra al terminar el render. Solo sha256 forma parte de la huella de render.",
   "blend": {
-    "release_tag": "blend-fase3-v1",
-    "url": "https://github.com/mariogarcia131/Proyecto-Blender/releases/download/blend-fase3-v1/Avion_Fase_3_Cabina.blend",
+    "origen_url": "https://temp.sh/PENDIENTE/Avion_Fase_3_Cabina.blend",
+    "release_tag": "transporte-fase3-v1",
+    "url": "https://github.com/mariogarcia131/Proyecto-Blender/releases/download/transporte-fase3-v1/Avion_Fase_3_Cabina.blend",
     "sha256": "PENDIENTE_sha256_de_64_caracteres_hexadecimales"
   },
 
@@ -25,7 +26,6 @@
     "inicio": 1,
     "fin": 2700
   },
-
   "resolucion": {
     "ancho": 1920,
     "alto": 1080,
@@ -66,7 +66,7 @@
     "patron": "frame_{:06d}.png"
   },
 
-  "_troceo": "frames_por_trozo = floor(presupuesto_render_s / (s_por_frame_max_benchmark * factor_seguridad)). Se rellena tras el benchmark. NO forma parte de la huella: puede cambiar entre ejecuciones (p. ej. -20 % en un resume).",
+  "_troceo": "frames_por_trozo = floor(presupuesto_render_s / (s_por_frame_max_benchmark * factor_seguridad)). Se rellena tras el benchmark. Máximo 60 trozos (3 oleadas) por parte para no superar la retención de 1 día de los artefactos. NO forma parte de la huella.",
   "troceo": {
     "presupuesto_render_s": 16200,
     "factor_seguridad": 1.15,
@@ -75,6 +75,7 @@
     "fecha_benchmark": null,
     "frames_por_trozo": null,
     "max_paralelo": 20,
+    "trozos_max_por_parte": 60,
     "parada_suave_s": 18000
   },
 
@@ -83,11 +84,10 @@
     "frames": [1, 1350, 2700]
   },
 
-  "_video": "Nombre del MP4 final (ASCII sin espacios). Título visible: 'Vídeo Fase 3'.",
+  "_video": "Nombre del MP4 final (ASCII sin espacios). Título visible en entrega.json: 'Vídeo Fase 3'. El repositorio no publica el vídeo: se entrega por el servicio externo.",
   "video": {
     "nombre_salida": "Video_Fase_3.mp4",
     "titulo": "Vídeo Fase 3",
-    "release_tag": "video-fase3-v1",
     "crf_intermedio": 11,
     "pix_fmt_intermedio": "yuv444p10le",
     "crf_final": 18,
@@ -96,7 +96,7 @@
     "perfil_final": "high"
   },
 
-  "_fotos": "Opcional. Fotos fijas en 4K con más muestras (modo 'fotos' de render.yml). Dejar la lista vacía si no hay fotos.",
+  "_fotos": "Opcional. Fotos fijas en 4K con más muestras; en modo full van en la última parte. Se entregan en un ZIP. Dejar la lista vacía si no hay fotos.",
   "fotos": [
     {
       "id": "cabina_frontal",
@@ -107,5 +107,22 @@
       "muestras": 1024
     }
   ],
-  "fotos_release_tag": "fotos-fase3-v1"
+
+  "_qc": "Parámetros de la muestra y de las comprobaciones automáticas del control de calidad que hace la nube de Claude antes de entregar.",
+  "qc": {
+    "frames_muestra_max": 24,
+    "fronteras_max": 8,
+    "fotos_muestra_max": 10,
+    "psnr_min_db": 38,
+    "luminancia_negro": 0.002
+  },
+
+  "_entrega": "Servicio de descarga externo sin cuenta (verificado 2026-10-02): temp.sh = 4 GB por archivo, 3 días. Alternativa litterbox = 1 GB por archivo, 72 h.",
+  "entrega": {
+    "servicio": "temp.sh",
+    "alternativa": "litterbox",
+    "litterbox_tiempo": "72h",
+    "nombre_zip_fotos": "Fotos_Fase_3.zip",
+    "nombre_blend": "Avion_Fase_3_Cabina.blend"
+  }
 }

@@ -1,0 +1,24 @@
+# Los .blend NUNCA van en Git ni en LFS: se publican como assets de una Release
+# (ver docs/ESTRATEGIA_RENDER.md, sección c).
+*.blend
+*.blend[0-9]
+*.blend[0-9][0-9]
+
+# Salidas de render y montaje (viven en artefactos y Releases)
+frames/
+segmentos/
+*.mp4
+*.png.tmp
+*.tmp.png
+benchmark.json
+manifest-*.json
+manifiesto_final.json
+
+# Blender descargado en local para pruebas
+blender-*-linux-x64/
+blender-*-linux-x64.tar.xz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
